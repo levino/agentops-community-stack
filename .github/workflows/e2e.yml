@@ -104,7 +104,7 @@ jobs:
           # our own Traefik binds 80/443 via hostPort.
           k3d cluster create citadel \
             --no-lb \
-            -p "80:80@server:0" -p "443:443@server:0" \
+            -p "80:80@server:0:direct" -p "443:443@server:0:direct" \
             --k3s-arg "--disable=traefik@server:0" \
             --k3s-arg "--disable=servicelb@server:0" \
             --k3s-arg "--disable=metrics-server@server:0"
