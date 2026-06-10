@@ -123,11 +123,9 @@ jobs:
               errors
               template IN A testville.example {
                   answer \"{{ .Name }} 60 IN A $NODE_IP\"
-                  fallthrough
               }
               template IN AAAA testville.example {
                   rcode NOERROR
-                  fallthrough
               }
           }"
           kubectl -n kube-system rollout restart deploy/coredns
@@ -146,29 +144,34 @@ jobs:
 
       - name: Apply cluster substrate
         run: |
-          apply_with_retry() {
-            for i in 1 2 3 4 5 6; do
-              if kubectl apply --server-side --force-conflicts -k "$1"; then return 0; fi
-              echo "apply of $1 failed (attempt $i), retrying after CRDs settle"; sleep 15
-            done
-            return 1
-          }
-          apply_with_retry "$DERIVATIVE/cluster"
+          # First attempts race the cert-manager CRDs/webhook — retry until
+          # everything (including the ClusterIssuer) is accepted.
+          for i in $(seq 1 12); do
+            if kubectl apply --server-side --force-conflicts -k "$DERIVATIVE/cluster"; then exit 0; fi
+            echo "apply attempt $i failed, retrying while CRDs/webhook settle"; sleep 15
+          done
+          exit 1
 
       - name: Wait for substrate
         run: |
-          kubectl -n cert-manager rollout status deploy/cert-manager deploy/cert-manager-webhook deploy/cert-manager-cainjector --timeout=300s
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl -n cert-manager rollout status "deploy/$d" --timeout=300s
+          done
           kubectl wait --for=condition=Ready helmrelease/traefik -n kube-system --timeout=600s
           kubectl -n kube-system rollout status ds/traefik --timeout=300s
           kubectl -n kube-system rollout status deploy/sealed-secrets-controller --timeout=300s
-          kubectl get clusterissuer acme -o yaml
+          kubectl get clusterissuer acme
 
       - name: Seal ZITADEL secrets (exercises the bootstrap procedure)
         run: |
           cd "$DERIVATIVE"
-          ./scripts/fetch-sealing-cert.sh
+          # The controller needs a moment after rollout to generate its key.
+          for i in $(seq 1 12); do
+            if ./scripts/fetch-sealing-cert.sh; then break; fi
+            echo "sealing key not ready yet ($i)"; sleep 10
+          done
           ./scripts/seal-zitadel-secrets.sh
-          git -C "$DERIVATIVE" status --porcelain || true
+          ls -l zitadel/sealed-zitadel-*.yaml
 
       - name: Apply ZITADEL
         run: |
