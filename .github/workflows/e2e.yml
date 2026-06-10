@@ -1,0 +1,297 @@
+# CI harness: generate a derivative with Copier, boot it on k3d, issue real
+# ACME certificates against an in-cluster Pebble, run identity-as-code with
+# OpenTofu, deploy apps through the per-app generator and smoke-test the
+# ForwardAuth pattern. See README.md §8.
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DERIVATIVE: /tmp/derivative
+
+jobs:
+  # Fast feedback: broken Jinja, invalid YAML after substitution, invalid tofu.
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+
+      - name: Generate derivative
+        run: |
+          uvx --from 'copier>=9.4' copier copy --defaults \
+            --data-file tests/answers-ci.yml --vcs-ref HEAD . "$DERIVATIVE"
+          find "$DERIVATIVE" -type f | sort
+
+      - name: Kustomize build all entry points
+        run: |
+          for dir in cluster apps patterns/app-forwardauth; do
+            echo "=== $dir ==="
+            kubectl kustomize "$DERIVATIVE/$dir" > /dev/null
+          done
+          # zitadel/ references sealed secrets that only exist after sealing
+          # against a live cluster — validate the build with placeholders.
+          for name in masterkey db-credentials; do
+            cat > "$DERIVATIVE/zitadel/sealed-zitadel-$name.yaml" <<EOF
+          apiVersion: bitnami.com/v1alpha1
+          kind: SealedSecret
+          metadata:
+            name: zitadel-$name
+            namespace: zitadel
+          spec:
+            encryptedData:
+              placeholder: QUdQbGFjZWhvbGRlcg==
+            template:
+              metadata:
+                name: zitadel-$name
+                namespace: zitadel
+          EOF
+          done
+          echo "=== zitadel ==="
+          kubectl kustomize "$DERIVATIVE/zitadel" > /dev/null
+
+      - name: Tofu validate
+        run: |
+          cd "$DERIVATIVE/tofu/zitadel"
+          tofu init -backend=false
+          tofu validate
+
+  e2e:
+    needs: generate
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both architectures — enforces the multi-arch invariant.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+
+      - name: Install k3d, flux, kubeseal
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          curl -fsSL https://fluxcd.io/install.sh | sudo bash
+          ARCH=$(dpkg --print-architecture)
+          KUBESEAL_VERSION=0.27.3
+          curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-${ARCH}.tar.gz" \
+            | tar xz kubeseal
+          sudo install -m 755 kubeseal /usr/local/bin/kubeseal
+
+      - name: Generate derivative
+        run: |
+          uvx --from 'copier>=9.4' copier copy --defaults \
+            --data-file tests/answers-ci.yml --vcs-ref HEAD . "$DERIVATIVE"
+
+      - name: Create k3d cluster
+        run: |
+          # Same shape as a real node: bundled Traefik/servicelb disabled,
+          # our own Traefik binds 80/443 via hostPort.
+          k3d cluster create citadel \
+            --no-lb \
+            -p "80:80@server:0" -p "443:443@server:0" \
+            --k3s-arg "--disable=traefik@server:0" \
+            --k3s-arg "--disable=servicelb@server:0" \
+            --k3s-arg "--disable=metrics-server@server:0"
+          kubectl cluster-info
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+
+      - name: Wire test DNS (cluster + runner)
+        run: |
+          NODE_IP=$(kubectl get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          echo "node ip: $NODE_IP"
+          # In-cluster: *.testville.example resolves to the node, where
+          # Traefik listens on hostPort 80/443 (used by Pebble's HTTP-01
+          # validation and by in-cluster OIDC clients).
+          kubectl -n kube-system create configmap coredns-custom \
+            --from-literal=testville.server="testville.example:53 {
+              errors
+              template IN A testville.example {
+                  answer \"{{ .Name }} 60 IN A $NODE_IP\"
+                  fallthrough
+              }
+              template IN AAAA testville.example {
+                  rcode NOERROR
+                  fallthrough
+              }
+          }"
+          kubectl -n kube-system rollout restart deploy/coredns
+          kubectl -n kube-system rollout status deploy/coredns --timeout=120s
+          # On the runner: the same names point at the mapped k3d ports.
+          echo "127.0.0.1 testville.example id.testville.example auth.testville.example whoami.testville.example members.testville.example" \
+            | sudo tee -a /etc/hosts
+
+      - name: Deploy Pebble (test ACME server)
+        run: |
+          kubectl apply -f tests/pebble/pebble.yaml
+          kubectl -n pebble rollout status deploy/pebble --timeout=120s
+
+      - name: Install Flux controllers
+        run: flux install
+
+      - name: Apply cluster substrate
+        run: |
+          apply_with_retry() {
+            for i in 1 2 3 4 5 6; do
+              if kubectl apply --server-side --force-conflicts -k "$1"; then return 0; fi
+              echo "apply of $1 failed (attempt $i), retrying after CRDs settle"; sleep 15
+            done
+            return 1
+          }
+          apply_with_retry "$DERIVATIVE/cluster"
+
+      - name: Wait for substrate
+        run: |
+          kubectl -n cert-manager rollout status deploy/cert-manager deploy/cert-manager-webhook deploy/cert-manager-cainjector --timeout=300s
+          kubectl wait --for=condition=Ready helmrelease/traefik -n kube-system --timeout=600s
+          kubectl -n kube-system rollout status ds/traefik --timeout=300s
+          kubectl -n kube-system rollout status deploy/sealed-secrets-controller --timeout=300s
+          kubectl get clusterissuer acme -o yaml
+
+      - name: Seal ZITADEL secrets (exercises the bootstrap procedure)
+        run: |
+          cd "$DERIVATIVE"
+          ./scripts/fetch-sealing-cert.sh
+          ./scripts/seal-zitadel-secrets.sh
+          git -C "$DERIVATIVE" status --porcelain || true
+
+      - name: Apply ZITADEL
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if kubectl apply --server-side --force-conflicts -k "$DERIVATIVE/zitadel"; then break; fi
+            echo "retrying zitadel apply ($i)"; sleep 15
+          done
+
+      - name: Wait for ZITADEL
+        run: |
+          kubectl wait --for=condition=Ready helmrelease/zitadel-postgresql -n zitadel --timeout=600s
+          # First start is slow: init + setup jobs run before the deployment.
+          kubectl wait --for=condition=Ready helmrelease/zitadel -n zitadel --timeout=1500s
+          kubectl -n zitadel rollout status deploy/zitadel --timeout=300s
+          kubectl -n zitadel rollout status deploy/zitadel-login --timeout=300s
+
+      - name: Fetch Pebble root CA
+        run: |
+          kubectl -n pebble port-forward svc/pebble 15000:15000 &
+          for i in $(seq 1 20); do
+            if curl -sk https://localhost:15000/roots/0 -o /tmp/pebble-root.pem && [ -s /tmp/pebble-root.pem ]; then break; fi
+            sleep 2
+          done
+          openssl x509 -in /tmp/pebble-root.pem -noout -subject
+
+      - name: Smoke — TLS via real ACME + OIDC discovery
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --cacert /tmp/pebble-root.pem \
+                 https://id.testville.example/.well-known/openid-configuration \
+                 -o /tmp/oidc.json; then break; fi
+            echo "waiting for certificate/ingress ($i)"; sleep 10
+          done
+          cat /tmp/oidc.json
+          jq -e '.issuer == "https://id.testville.example"' /tmp/oidc.json
+
+      - name: Identity as code (tofu apply against CI ZITADEL)
+        run: |
+          kubectl create namespace terraform-state
+          kubectl get secret -n zitadel iam-admin -o jsonpath='{.data.iam-admin\.json}' \
+            | base64 -d > "$DERIVATIVE/tofu/zitadel/service-user.json"
+          cd "$DERIVATIVE/tofu/zitadel"
+          tofu init
+          SSL_CERT_FILE=/tmp/pebble-root.pem tofu apply -auto-approve
+          test -n "$(tofu output -raw forwardauth_client_id)"
+
+      - name: Deploy apps via the per-app generator
+        run: |
+          cd "$DERIVATIVE"
+          ./scripts/new-app.sh whoami --domain whoami.testville.example --image traefik/whoami --port 80
+          ./scripts/new-app.sh members --domain members.testville.example --image traefik/whoami --port 80 --protected
+          cat apps/kustomization.yaml
+          kubectl apply --server-side -k apps/
+          kubectl -n whoami rollout status deploy/whoami --timeout=300s
+          kubectl -n members rollout status deploy/members --timeout=300s
+
+      - name: Smoke — app over TLS
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --cacert /tmp/pebble-root.pem https://whoami.testville.example/ -o /dev/null; then break; fi
+            echo "waiting for app certificate ($i)"; sleep 10
+          done
+          curl -fsS --cacert /tmp/pebble-root.pem https://whoami.testville.example/ | head -5
+
+      - name: Deploy ForwardAuth pattern
+        run: |
+          cd "$DERIVATIVE"
+          CLIENT_ID=$(cd tofu/zitadel && tofu output -raw forwardauth_client_id)
+          CLIENT_SECRET=$(cd tofu/zitadel && tofu output -raw forwardauth_client_secret)
+          COOKIE_SECRET=$(openssl rand -base64 32 | head -c 32)
+          kubectl apply -f patterns/app-forwardauth/namespace.yaml
+          # CI-only: oauth2-proxy must trust Pebble's root for OIDC discovery.
+          kubectl -n forwardauth create configmap acme-ca --from-file=ca.crt=/tmp/pebble-root.pem
+          # Seal the OIDC client credentials — second exercise of the sealing path.
+          kubectl create secret generic oauth2-proxy -n forwardauth \
+            --from-literal=client-id="$CLIENT_ID" \
+            --from-literal=client-secret="$CLIENT_SECRET" \
+            --from-literal=cookie-secret="$COOKIE_SECRET" \
+            --dry-run=client -o yaml \
+            | kubeseal --cert sealed-secrets-public-key.pem -o yaml \
+            | kubectl apply -f -
+          kubectl apply --server-side -k patterns/app-forwardauth/
+          kubectl -n forwardauth rollout status deploy/oauth2-proxy --timeout=300s
+
+      - name: Smoke — ForwardAuth redirects unauthenticated requests
+        run: |
+          for i in $(seq 1 30); do
+            CODE=$(curl --cacert /tmp/pebble-root.pem -s -o /dev/null -w '%{http_code}' https://auth.testville.example/ping || true)
+            if [ "$CODE" = "200" ]; then break; fi
+            echo "waiting for oauth2-proxy ingress/cert ($i, got $CODE)"; sleep 10
+          done
+          # The sign-in flow must point at the central IdP.
+          LOCATION=$(curl --cacert /tmp/pebble-root.pem -s -o /dev/null -w '%{redirect_url}' \
+            "https://auth.testville.example/oauth2/start?rd=https://members.testville.example/")
+          echo "authorize redirect: $LOCATION"
+          echo "$LOCATION" | grep -q '^https://id\.testville\.example/'
+          # The protected app must not serve content unauthenticated.
+          CODE=$(curl --cacert /tmp/pebble-root.pem -s -o /tmp/protected.out -w '%{http_code}' https://members.testville.example/)
+          echo "protected app status: $CODE"
+          case "$CODE" in
+            302|401|403) ;;
+            *) echo "expected 302/401/403, got $CODE"; cat /tmp/protected.out; exit 1 ;;
+          esac
+          ! grep -q "Hostname" /tmp/protected.out  # whoami body must not leak
+
+      - name: Debug dump
+        if: failure()
+        run: |
+          set +e
+          echo "=== nodes ==="; kubectl describe node | tail -40
+          echo "=== pods ==="; kubectl get pods -A -o wide
+          echo "=== events ==="; kubectl get events -A --sort-by=.lastTimestamp | tail -80
+          echo "=== helmreleases ==="; kubectl get helmrelease -A
+          kubectl describe helmrelease -A | grep -A 10 "Conditions:"
+          echo "=== certs ==="; kubectl get clusterissuer,certificates,certificaterequests,orders,challenges -A
+          kubectl describe challenges -A | tail -60
+          echo "=== ingresses ==="; kubectl get ingress -A
+          echo "=== zitadel logs ==="
+          kubectl -n zitadel logs deploy/zitadel --tail=80
+          kubectl -n zitadel logs -l job-name=zitadel-init --tail=40
+          kubectl -n zitadel logs -l job-name=zitadel-setup --tail=40
+          echo "=== postgres ==="; kubectl -n zitadel logs statefulset/zitadel-postgresql --tail=40
+          echo "=== traefik ==="; kubectl -n kube-system logs ds/traefik --tail=60
+          echo "=== cert-manager ==="; kubectl -n cert-manager logs deploy/cert-manager --tail=60
+          echo "=== pebble ==="; kubectl -n pebble logs deploy/pebble --tail=60
+          echo "=== oauth2-proxy ==="; kubectl -n forwardauth logs deploy/oauth2-proxy --tail=60

@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# Layer-2 generator: stamp out the per-app pattern (namespace, scoped RBAC,
+# Flux registration, TLS ingress). See apps/README.md.
+#
+# Own app (blessed path — the app repo owns deploy/overlays/production):
+#   scripts/new-app.sh <name> --repo <github-url> [--path deploy/overlays/production]
+#
+# Third-party / in-repo app:
+#   scripts/new-app.sh <name> --domain <host> --image <image> [--port 80] [--protected]
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+usage() {
+  sed -n '2,9p' "scripts/$(basename "$0")"
+  exit 1
+}
+
+[ $# -ge 1 ] || usage
+NAME=$1
+shift
+[[ "$NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "error: name must be lowercase DNS-safe" >&2; exit 1; }
+
+DOMAIN="" IMAGE="" PORT=80 PROTECTED=0 REPO="" REPO_PATH="deploy/overlays/production"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --domain) DOMAIN=$2; shift 2 ;;
+    --image) IMAGE=$2; shift 2 ;;
+    --port) PORT=$2; shift 2 ;;
+    --protected) PROTECTED=1; shift ;;
+    --repo) REPO=$2; shift 2 ;;
+    --path) REPO_PATH=$2; shift 2 ;;
+    *) echo "error: unknown argument $1" >&2; usage ;;
+  esac
+done
+
+register() {
+  # Add an entry to apps/kustomization.yaml (idempotent).
+  local entry=$1
+  if grep -qE "^[[:space:]]*-[[:space:]]*${entry}[[:space:]]*$" apps/kustomization.yaml; then
+    return
+  fi
+  if grep -q 'resources: \[\]' apps/kustomization.yaml; then
+    sed -i "s|resources: \[\]|resources:\n  - ${entry}|" apps/kustomization.yaml
+  else
+    printf '  - %s\n' "$entry" >> apps/kustomization.yaml
+  fi
+}
+
+if [ -n "$REPO" ]; then
+  # ---- blessed path: register an app that owns its own deploy/ overlay ----
+  REPO_SLUG=${REPO#https://github.com/}
+  REPO_SLUG=${REPO_SLUG%.git}
+  [[ "$REPO_SLUG" == */* ]] || { echo "error: --repo must be a https://github.com/<owner>/<repo> URL" >&2; exit 1; }
+
+  cat > "apps/${NAME}.yaml" <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAME}
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: ${NAME}
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: ${REPO}
+  ref:
+    branch: main
+  # For private repositories, point this at a secret with credentials:
+  # secretRef:
+  #   name: flux-system
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ${NAME}
+  namespace: flux-system
+spec:
+  interval: 10m
+  path: ./${REPO_PATH}
+  prune: false
+  sourceRef:
+    kind: GitRepository
+    name: ${NAME}
+---
+# Namespace-scoped CI access for PR previews — never cluster-admin.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: preview-deployer
+  namespace: ${NAME}
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: https://token.actions.githubusercontent.com#repo:${REPO_SLUG}:pull_request
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: preview-deployer
+EOF
+  register "${NAME}.yaml"
+  echo "Created apps/${NAME}.yaml (Flux pulls ${REPO} → ${REPO_PATH})"
+  echo "Next: commit & push. If the app needs login, see patterns/app-native-oidc/."
+  exit 0
+fi
+
+# ---- in-repo path: third-party app, manifests live here ----
+[ -n "$DOMAIN" ] && [ -n "$IMAGE" ] || usage
+
+ANNOTATIONS=""
+if [ "$PROTECTED" = "1" ]; then
+  ANNOTATIONS="
+    traefik.ingress.kubernetes.io/router.middlewares: forwardauth-oauth-errors@kubernetescrd,forwardauth-forwardauth@kubernetescrd"
+fi
+
+mkdir -p "apps/${NAME}"
+cat > "apps/${NAME}/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - app.yaml
+EOF
+
+cat > "apps/${NAME}/app.yaml" <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAME}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${NAME}
+  namespace: ${NAME}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app: ${NAME}
+  template:
+    metadata:
+      labels:
+        app: ${NAME}
+    spec:
+      containers:
+        - name: app
+          # Must be built for {{ target_arch }} (the server's architecture).
+          image: ${IMAGE}
+          ports:
+            - containerPort: ${PORT}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${NAME}
+  namespace: ${NAME}
+spec:
+  selector:
+    app: ${NAME}
+  ports:
+    - port: 80
+      targetPort: ${PORT}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${NAME}
+  namespace: ${NAME}
+  annotations:
+    cert-manager.io/cluster-issuer: acme${ANNOTATIONS}
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - ${DOMAIN}
+      secretName: ${NAME}-tls
+  rules:
+    - host: ${DOMAIN}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ${NAME}
+                port:
+                  number: 80
+EOF
+
+register "${NAME}/"
+echo "Created apps/${NAME}/ (${IMAGE} at https://${DOMAIN})"
+if [ "$PROTECTED" = "1" ]; then
+  echo "Protected by ForwardAuth — patterns/app-forwardauth/ must be deployed."
+fi
+echo "Next: commit & push — Flux rolls it out."

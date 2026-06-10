@@ -1,0 +1,5 @@
+# OpenTofu machinery & credentials — see tofu/zitadel/.gitignore too.
+.terraform/
+*.tfstate
+*.tfstate.*
+service-user.json

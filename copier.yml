@@ -1,0 +1,82 @@
+# Copier template configuration.
+#
+# Everything under template/ is generated into the derivative repo;
+# everything else (CI harness, tests, this file) stays in the template.
+_min_copier_version: "9.4.0"
+_subdirectory: template
+_envops:
+  trim_blocks: true
+  lstrip_blocks: true
+
+community_name:
+  type: str
+  help: >-
+    Human-readable name of the community (e.g. "Rössing"). Becomes the
+    ZITADEL organization — the shared identity pool.
+  validator: >-
+    {% if community_name | trim | length == 0 %}community_name must not be empty{% endif %}
+
+project_name:
+  type: str
+  help: Name of the generated infrastructure repository.
+  default: "{{ community_name | lower | replace(' ', '-') | replace('ä', 'ae') | replace('ö', 'oe') | replace('ü', 'ue') | replace('ß', 'ss') }}-infra"
+
+domain:
+  type: str
+  help: >-
+    Base domain of the community (e.g. roessing.example). ZITADEL lands on
+    id.<domain>; a wildcard DNS record *.<domain> must point at the server.
+  validator: >-
+    {% if '.' not in domain or ' ' in domain or '://' in domain %}domain must be a bare DNS name like example.org{% endif %}
+
+server_ipv4:
+  type: str
+  help: Public IPv4 address of the server.
+  validator: >-
+    {% if domain == server_ipv4 or server_ipv4.count('.') != 3 %}server_ipv4 must be a dotted-quad IPv4 address{% endif %}
+
+acme_email:
+  type: str
+  help: E-mail address for the ACME (Let's Encrypt) account and the first admin user.
+  validator: >-
+    {% if '@' not in acme_email %}acme_email must be an e-mail address{% endif %}
+
+github_owner:
+  type: str
+  help: GitHub user or organization that will own the generated repository.
+
+target_arch:
+  type: str
+  help: CPU architecture of the server node. Container images MUST be built for it.
+  choices:
+    - arm64
+    - amd64
+  default: arm64
+
+container_registry:
+  type: str
+  help: Container registry the apps are pulled from.
+  default: ghcr.io
+
+acme_environment:
+  type: str
+  help: >-
+    ACME endpoint for cert-manager. Use "production" for real deployments,
+    "staging" while experimenting with DNS, "pebble" ONLY in CI/test
+    clusters (expects a Pebble test ACME server at
+    pebble.pebble.svc.cluster.local:14000).
+  choices:
+    - production
+    - staging
+    - pebble
+  default: production
+
+associations:
+  type: yaml
+  multiline: true
+  help: >-
+    Clubs / subgroups of the community. Each becomes a ZITADEL project with
+    the listed roles; roles end up as claims in the tokens.
+  default: |-
+    - name: sports-club
+      roles: [member, board]

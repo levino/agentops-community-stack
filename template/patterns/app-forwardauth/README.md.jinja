@@ -1,0 +1,70 @@
+# Pattern: ForwardAuth — central login for apps that cannot do their own auth
+
+The convenient front door for third-party apps, dashboards and
+"members only" pages: one oauth2-proxy instance acts as a Traefik
+ForwardAuth middleware. The app gets headers only
+(`X-Auth-Request-User`, `X-Auth-Request-Email`, `X-Auth-Request-Groups`);
+authorization is coarse (logged in? in group X?).
+
+For apps you build yourself that need real tokens and fine-grained roles,
+use `patterns/app-native-oidc/` instead.
+
+## Deploy (once per cluster)
+
+1. The OIDC client already exists: `tofu/zitadel/forwardauth.tf` manages
+   the `forwardauth` app in the `infrastructure` project. Get its
+   credentials:
+
+   ```bash
+   cd tofu/zitadel
+   CLIENT_ID=$(tofu output -raw forwardauth_client_id)
+   CLIENT_SECRET=$(tofu output -raw forwardauth_client_secret)
+   COOKIE_SECRET=$(openssl rand -base64 32 | head -c 32)
+   cd ../..
+   ```
+
+2. Seal the credentials (offline, against the repo's public key):
+
+   ```bash
+   kubectl create secret generic oauth2-proxy -n forwardauth \
+     --from-literal=client-id="$CLIENT_ID" \
+     --from-literal=client-secret="$CLIENT_SECRET" \
+     --from-literal=cookie-secret="$COOKIE_SECRET" \
+     --dry-run=client -o yaml \
+     | kubeseal --cert sealed-secrets-public-key.pem -o yaml \
+     > patterns/app-forwardauth/sealed-oauth2-proxy.yaml
+   ```
+
+3. Register the pattern in `apps/kustomization.yaml`:
+
+   ```yaml
+   resources:
+     - ../patterns/app-forwardauth/
+   ```
+
+   add `sealed-oauth2-proxy.yaml` to this directory's `kustomization.yaml`,
+   commit, push — Flux deploys oauth2-proxy at `auth.{{ domain }}`.
+
+## Protect an app
+
+Annotate its ingress (or use `scripts/new-app.sh ... --protected`):
+
+```yaml
+metadata:
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: >-
+      forwardauth-oauth-errors@kubernetescrd,forwardauth-forwardauth@kubernetescrd
+```
+
+Unauthenticated requests are sent through the sign-in flow at
+`id.{{ domain }}`; authenticated ones pass with identity headers attached.
+
+## How it works
+
+- `middlewares.yaml` defines the pair: `forwardauth` (subrequest to
+  oauth2-proxy's `/oauth2/auth`) and `oauth-errors` (rewrites the 401 into
+  a 302 to `/oauth2/sign_in`).
+- The session cookie is valid for `.{{ domain }}` — one login covers every
+  protected app.
+- oauth2-proxy validates the OIDC discovery document of
+  `https://id.{{ domain }}` at startup; ZITADEL must be up first.

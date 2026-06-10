@@ -1,0 +1,74 @@
+# Agent contract — {{ project_name }}
+
+This repository runs the infrastructure of **{{ community_name }}**:
+a single-node k3s cluster on {{ server_ipv4 }} ({{ target_arch }}), GitOps
+via Flux, central identity via ZITADEL at `id.{{ domain }}`. It is generated
+from [citadel-stack-template](https://github.com/levino/citadel-stack-template)
+and is designed so that **you, the agent, can build and operate it from
+zero** — the human is product owner, not operator.
+
+Read this file first. For any non-trivial operation there is a runbook:
+
+- Build everything from scratch: `runbooks/bootstrap-from-zero.md`
+- Known footguns (read BEFORE debugging): `runbooks/incidents/`
+- ZITADEL bootstrap secrets: `zitadel/SECRETS.md`
+- Identity as code: `tofu/zitadel/README.md`
+- Adding apps: `apps/README.md` and `patterns/`
+
+## Invariants (hard rules — never break, never "temporarily" bypass)
+
+1. **GitOps is the single source of truth.** No manual `kubectl apply`
+   outside the documented bootstrap steps. To change the cluster, change
+   this repo. If you find drift, fix the repo, not the cluster.
+2. **Never `cluster-admin` for CI/OIDC identities.** CI identities get the
+   `preview-deployer` ClusterRole via namespace-scoped RoleBinding only
+   (`scripts/new-app.sh` does this correctly).
+3. **Secrets enter this repo only as SealedSecrets.** Never commit
+   plaintext secrets, never echo generated secrets into logs. Seal offline
+   against `sealed-secrets-public-key.pem`.
+4. **Images must run on {{ target_arch }}.** Build multi-arch
+   (`platforms: linux/amd64,linux/arm64`) or pin {{ target_arch }} images.
+   A pull that works on your machine proves nothing.
+5. **Identity is declarative.** Orgs, projects, roles, OIDC clients live in
+   `tofu/zitadel/` — not in the ZITADEL UI. UI is for humans doing
+   self-service member management, nothing else.
+6. **ZITADEL is an IdP, not a CRM.** Domain data (fees, join dates,
+   membership numbers) belongs in app databases, keyed by the token `sub`.
+7. **Single node, single replica is a feature** (cheap infra). Do not add
+   HA machinery.
+
+## Layout
+
+| Path | What | Propagation |
+|---|---|---|
+| `flux/` | GitOps entry point (GitRepository + Kustomizations) | applied once at bootstrap, then self-managed |
+| `cluster/` | substrate: traefik, cert-manager, sealed-secrets, rbac | Flux |
+| `zitadel/` | ZITADEL + Postgres + sealed bootstrap secrets | Flux (separate Kustomization — fails until secrets are sealed) |
+| `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Flux |
+| `tofu/zitadel/` | identity as code (org/projects/roles/clients) | `tofu apply` (local) |
+| `patterns/` | copyable recipes: native OIDC, ForwardAuth | read, copy, adapt |
+| `runbooks/` | bootstrap + incidents | read |
+
+## Verify commands (use these before declaring anything healthy)
+
+```bash
+flux get kustomizations          # all Ready=True
+flux get helmreleases -A         # traefik, zitadel-postgresql, zitadel Ready
+kubectl get pods -A | grep -v Running | grep -v Completed   # should be empty
+kubectl get certificates -A      # all Ready=True
+curl -fsS https://id.{{ domain }}/.well-known/openid-configuration | head -3
+kubectl describe node | grep -A5 Conditions   # no DiskPressure (see incidents/)
+```
+
+## Operating rules of thumb
+
+- A change is deployed when Flux has reconciled it — verify with
+  `flux get kustomizations`, not by assuming.
+- If a HelmRelease hangs >30s in install: pull the pod logs of its
+  init/setup hooks IMMEDIATELY (see `runbooks/incidents/zitadel-bootstrap.md`,
+  lesson learned).
+- After every real incident: write `runbooks/incidents/<date>-<slug>.md`
+  (what happened, root cause, fix, prevention). If the lesson generalizes,
+  open a PR against the template repo — that is the feedback loop.
+- The issuer is named `acme` in every environment. Do not rename it, do not
+  hardcode ACME URLs anywhere outside `cluster/cert-manager/issuer.yaml`.

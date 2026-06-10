@@ -1,0 +1,18 @@
+variable "zitadel_domain" {
+  type        = string
+  description = "FQDN of the ZITADEL instance."
+  default     = "id.{{ domain }}"
+}
+
+variable "jwt_profile_file" {
+  type        = string
+  description = <<-EOT
+    Path to the service-user key JSON for the ZITADEL provider. The chart's
+    setup job creates it automatically as k8s secret zitadel/iam-admin —
+    extract it with:
+      kubectl get secret -n zitadel iam-admin \
+        -o jsonpath='{.data.iam-admin\.json}' | base64 -d > service-user.json
+    The file is gitignored and must never be committed.
+  EOT
+  default     = "./service-user.json"
+}

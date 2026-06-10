@@ -1,0 +1,112 @@
+# One oauth2-proxy instance for the whole cluster — the front door for
+# every app that cannot do its own auth. Needs the secret `oauth2-proxy`
+# (client-id, client-secret, cookie-secret) — see README.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: forwardauth
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.2
+          args:
+            - --provider=oidc
+            - --provider-display-name={{ community_name }}
+            - --oidc-issuer-url=https://id.{{ domain }}
+            - --redirect-url=https://auth.{{ domain }}/oauth2/callback
+            - --email-domain=*
+            - --cookie-domain=.{{ domain }}
+            - --whitelist-domain=.{{ domain }}
+            - --cookie-secure=true
+            - --reverse-proxy=true
+            - --set-xauthrequest=true
+            - --code-challenge-method=S256
+            - --http-address=0.0.0.0:4180
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: cookie-secret
+{% if acme_environment == 'pebble' %}
+            # CI only: trust Pebble's root CA for OIDC discovery. The CI
+            # harness creates the acme-ca configmap.
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/acme/ca.crt
+          volumeMounts:
+            - name: acme-ca
+              mountPath: /etc/ssl/acme
+              readOnly: true
+{% endif %}
+          ports:
+            - containerPort: 4180
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 2
+            periodSeconds: 5
+{% if acme_environment == 'pebble' %}
+      volumes:
+        - name: acme-ca
+          configMap:
+            name: acme-ca
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: forwardauth
+spec:
+  selector:
+    app: oauth2-proxy
+  ports:
+    - port: 80
+      targetPort: 4180
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oauth2-proxy
+  namespace: forwardauth
+  annotations:
+    cert-manager.io/cluster-issuer: acme
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - auth.{{ domain }}
+      secretName: oauth2-proxy-tls
+  rules:
+    - host: auth.{{ domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 80
