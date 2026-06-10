@@ -1,0 +1,8 @@
+# Provider/state machinery
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+
+# Service-user key for the ZITADEL provider — NEVER commit.
+service-user.json

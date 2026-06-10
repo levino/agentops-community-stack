@@ -1,0 +1,32 @@
+# The identity model: one org = the community (shared identity pool),
+# one project per association, roles per project. See README.md.
+module "community" {
+  source = "./modules/community"
+
+  community_name = "{{ community_name }}"
+
+  associations = [
+{% for a in associations %}
+    {
+      name  = "{{ a.name }}"
+      roles = [{% for r in a.roles %}"{{ r }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+    },
+{% endfor %}
+  ]
+
+  # Delegated administration: map association name -> list of ZITADEL user
+  # IDs that become PROJECT_OWNER (self-service for their own members).
+  # Filled in as people join, e.g.:
+  #   managers = { "sports-club" = ["123456789012345678"] }
+  managers = {}
+}
+
+output "org_id" {
+  value       = module.community.org_id
+  description = "ZITADEL organization ID of the community."
+}
+
+output "project_ids" {
+  value       = module.community.project_ids
+  description = "Project IDs per association — needed when wiring OIDC clients."
+}

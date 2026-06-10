@@ -313,17 +313,18 @@ These apply to every instance and every agent that touches the stack:
 
 ---
 
-## 12. Open decisions (to settle before implementation)
+## 12. Open decisions (settled during implementation)
 
-- [ ] Blessed deploy path: the app owns its `deploy/` overlay (infra repo only
-      registers it) **vs.** manifests live in the infra repo. Recommendation:
-      the former.
-- [ ] Does the ZITADEL OpenTofu run locally or via CI OIDC? (Consistency vs.
-      simplicity — recommendation: CI OIDC once stable.)
-- [ ] Smooth out the secret bootstrap: the currently manual ritual is the
-      biggest hurdle for a rebuilding agent. Candidate for a dedicated
-      script/skill — and it is exercised by CI on every run (see §8).
+- [x] Blessed deploy path: **the app owns its `deploy/` overlay**; the infra
+      repo only registers it (`scripts/new-app.sh <name> --repo <url>`). An
+      in-repo mode exists for third-party apps that have no repo of their own.
+- [x] ZITADEL OpenTofu runs **locally** for real derivatives (the template's
+      CI exercises `tofu apply` end to end anyway). Moving to CI OIDC stays
+      an option once stable.
+- [x] Secret bootstrap is scripted: `scripts/fetch-sealing-cert.sh` +
+      `scripts/seal-zitadel-secrets.sh` — and CI runs both on every PR (§8).
 - [ ] Guardrail scope: which lessons become Kyverno/OPA policies?
+      (Milestone 6, deliberately open.)
 
 ---
 

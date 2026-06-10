@@ -1,0 +1,29 @@
+# {{ project_name }}
+
+Infrastructure of **{{ community_name }}** — an agent-operable GitOps stack
+with central single sign-on, generated from
+[citadel-stack-template](https://github.com/levino/citadel-stack-template).
+
+```
+Internet :80/:443 → {{ server_ipv4 }}
+  └── k3s + Traefik (hostPort)
+        ├── cert-manager        → TLS via ACME (issuer: acme)
+        ├── sealed-secrets      → secrets encrypted in git
+        ├── Flux                → this repo is the truth
+        ├── ZITADEL             → id.{{ domain }} (one identity per person)
+        └── apps                → one namespace each (apps/)
+```
+
+- **Operating manual for agents (start here): [AGENTS.md](AGENTS.md)**
+- Build from zero: [runbooks/bootstrap-from-zero.md](runbooks/bootstrap-from-zero.md)
+- Add an app: [apps/README.md](apps/README.md)
+- Identity model & clients: [tofu/zitadel/README.md](tofu/zitadel/README.md)
+
+## Updating from the template
+
+```bash
+uvx copier update   # merges template improvements into this repo
+```
+
+Lessons learned here that generalize should go back as PRs against the
+template (`runbooks/incidents/` → template).

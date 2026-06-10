@@ -1,0 +1,202 @@
+# Bootstrap from zero
+
+Bring up the full stack on a fresh server, top to bottom. Every step has a
+verify command — do not continue past a failing verify. This runbook covers
+exactly the residue CI cannot test: the k3s install, systemd, hostPort on a
+real NIC, real DNS and Let's Encrypt.
+
+Total time: ~30–45 minutes, most of it waiting for ZITADEL's first start.
+
+## 0. Prerequisites
+
+- A server (Ubuntu, {{ target_arch }}) reachable at `{{ server_ipv4 }}`,
+  root access, ports 80/443 free (no other web server running).
+- DNS: `*.{{ domain }}` (wildcard A record) → `{{ server_ipv4 }}`.
+- This repo pushed to `https://github.com/{{ github_owner }}/{{ project_name }}`.
+- Locally (or on the agent's machine): `kubectl`, `flux`, `kubeseal`,
+  `tofu`, `git`.
+
+**Verify DNS before anything else:**
+
+```bash
+dig +short id.{{ domain }} anything.{{ domain }}
+# both → {{ server_ipv4 }}
+```
+
+## 1. Install k3s
+
+On the server, as root:
+
+```bash
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --disable=servicelb" sh -
+```
+
+The bundled Traefik and servicelb MUST stay disabled — `cluster/traefik/`
+deploys our own Traefik with hostPort 80/443.
+
+Kubeconfig for your user:
+
+```bash
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown "$USER:$USER" ~/.kube/config && chmod 600 ~/.kube/config
+export KUBECONFIG=~/.kube/config
+```
+
+**Verify:**
+
+```bash
+kubectl get node   # one node, STATUS Ready
+```
+
+To operate remotely, add a `tls-san` for your API domain in
+`/etc/rancher/k3s/config.yaml` and open 6443 (see §7); for a first
+bootstrap, running directly on the server is fine.
+
+## 2. Install the Flux controllers
+
+```bash
+flux install
+```
+
+**Verify:**
+
+```bash
+kubectl -n flux-system get pods   # source/kustomize/helm/notification controllers Running
+```
+
+## 3. Connect Flux to this repo
+
+If the repo is private, first create credentials (deploy key or PAT):
+
+```bash
+flux create secret git flux-system \
+  --url=https://github.com/{{ github_owner }}/{{ project_name }} \
+  --username=git --password=<PAT>
+```
+
+and uncomment the `secretRef` in `flux/gotk-sync.yaml`. Then — the only
+manual `kubectl apply` in the lifetime of this cluster:
+
+```bash
+kubectl apply -k flux/
+```
+
+**Verify (cert-manager CRDs take a minute):**
+
+```bash
+flux get kustomizations
+# flux-system: Ready
+# cluster:     Ready          (traefik, cert-manager, sealed-secrets)
+# zitadel:     FAILING        ← expected! sealed secrets missing, next step
+# apps:        Ready          (empty)
+kubectl -n kube-system get ds traefik    # DESIRED 1, READY 1
+curl -sI http://{{ domain }}             # answers (404 is fine — Traefik is up)
+```
+
+## 4. Seal the ZITADEL bootstrap secrets
+
+```bash
+./scripts/fetch-sealing-cert.sh
+./scripts/seal-zitadel-secrets.sh
+git add sealed-secrets-public-key.pem zitadel/sealed-zitadel-*.yaml
+git commit -m "Seal ZITADEL bootstrap secrets" && git push
+flux reconcile kustomization zitadel --with-source
+```
+
+**Verify (first start takes 5–15 min — init and setup jobs run first):**
+
+```bash
+flux get helmreleases -n zitadel        # zitadel-postgresql, then zitadel → Ready
+kubectl -n zitadel get pods             # zitadel + zitadel-login Running
+curl -fsS https://id.{{ domain }}/.well-known/openid-configuration | head -3
+```
+
+If a HelmRelease hangs in install >30s: pull the init pod logs IMMEDIATELY —
+`runbooks/incidents/zitadel-bootstrap.md` (lesson learned section). Do not wait.
+
+**Verify TLS is real:**
+
+```bash
+kubectl get certificates -A             # all Ready=True
+curl -fsSI https://id.{{ domain }} > /dev/null && echo TLS OK
+```
+
+## 5. Identity as code
+
+```bash
+kubectl create namespace terraform-state
+kubectl get secret -n zitadel iam-admin \
+  -o jsonpath='{.data.iam-admin\.json}' | base64 -d > tofu/zitadel/service-user.json
+chmod 600 tofu/zitadel/service-user.json
+cd tofu/zitadel && tofu init && tofu apply
+```
+
+**Verify:**
+
+```bash
+tofu output project_ids                    # one ID per association
+tofu output -raw admin_initial_password    # read once, store in password manager
+```
+
+Log in at `https://id.{{ domain }}` as `admin` with that password (forced
+change on first login).
+
+## 6. ForwardAuth front door (optional but recommended)
+
+Follow `patterns/app-forwardauth/README.md` — seal the oauth2-proxy
+credentials from the tofu outputs, register the pattern, push.
+
+**Verify:**
+
+```bash
+curl -s -o /dev/null -w '%{redirect_url}\n' \
+  "https://auth.{{ domain }}/oauth2/start?rd=https://{{ domain }}/"
+# → https://id.{{ domain }}/...
+```
+
+## 7. (Optional) CI deploys via GitHub Actions OIDC
+
+To let app CIs deploy without stored kubeconfig secrets, configure the k3s
+API server as an OIDC consumer of GitHub Actions tokens. In
+`/etc/rancher/k3s/config.yaml`:
+
+```yaml
+kube-apiserver-arg:
+  - "oidc-issuer-url=https://token.actions.githubusercontent.com"
+  - "oidc-client-id={{ project_name }}"
+  - "oidc-username-claim=sub"
+  - "oidc-groups-claim=repository"
+tls-san:
+  - api.{{ domain }}
+```
+
+```bash
+sudo systemctl restart k3s
+sudo ufw allow 6443/tcp comment 'k3s API for GitHub Actions OIDC'
+sudo ufw reload
+```
+
+Source `Anywhere` is acceptable: GitHub's runner IPs rotate and the API
+enforces OIDC auth — unauthenticated requests get 401. If this rule is
+missing, CI deploys fail with `dial tcp {{ server_ipv4 }}:6443: i/o timeout`.
+
+CI identities authenticate as
+`https://token.actions.githubusercontent.com#repo:<owner>/<repo>:<ref>` —
+exactly the subjects `scripts/new-app.sh` binds to the `preview-deployer`
+role. Never bind them to cluster-admin (invariant).
+
+**Verify:** a `kubectl --token=<github-oidc-token>` from a workflow can
+deploy into its app namespace and nothing else.
+
+## 8. Done — handover to normal operation
+
+```bash
+flux get kustomizations    # everything Ready
+kubectl get pods -A | grep -vE 'Running|Completed'   # empty
+```
+
+From here on: changes happen via git (`AGENTS.md`), apps via
+`scripts/new-app.sh`, identities via `tofu/zitadel/`. If anything bites you
+during bootstrap that this runbook did not predict: fix the runbook, and if
+the lesson generalizes, PR it back to the template.

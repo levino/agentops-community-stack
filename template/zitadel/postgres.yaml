@@ -1,0 +1,55 @@
+# Postgres runs as its own HelmRelease, NOT via the zitadel chart's
+# postgresql.enabled: the zitadel init/setup jobs are pre-install hooks and
+# would run before any subchart resources exist (chicken-and-egg).
+# See runbooks/incidents/zitadel-bootstrap.md §1.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: bitnami
+  namespace: flux-system
+spec:
+  interval: 1h
+  type: oci
+  url: oci://registry-1.docker.io/bitnamicharts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: zitadel-postgresql
+  namespace: zitadel
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: postgresql
+      version: '16.x'
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: flux-system
+  values:
+    # Bitnami moved most public images from bitnami/* to bitnamilegacy/*
+    # in 2025 (subscription model). The chart's default image reference no
+    # longer exists. See runbooks/incidents/zitadel-bootstrap.md §4.
+    image:
+      repository: bitnamilegacy/postgresql
+    architecture: standalone
+    auth:
+      database: zitadel
+      username: zitadel
+      existingSecret: zitadel-db-credentials
+      secretKeys:
+        adminPasswordKey: postgresPassword
+        userPasswordKey: password
+    primary:
+      persistence:
+        enabled: true
+        size: 10Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+    readReplicas:
+      replicaCount: 0

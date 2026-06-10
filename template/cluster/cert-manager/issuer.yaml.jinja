@@ -1,0 +1,26 @@
+# The issuer is generated from the `acme_environment` answer — never
+# hardcoded. The issuer NAME stays "acme" in every environment so that
+# ingress annotations (cert-manager.io/cluster-issuer: acme) are identical
+# in production and CI.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: acme
+spec:
+  acme:
+{% if acme_environment == 'pebble' %}
+    # CI only: Pebble, Let's Encrypt's test ACME server, deployed in-cluster.
+    server: https://pebble.pebble.svc.cluster.local:14000/dir
+    skipTLSVerify: true
+{% elif acme_environment == 'staging' %}
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+{% else %}
+    server: https://acme-v02.api.letsencrypt.org/directory
+{% endif %}
+    email: {{ acme_email }}
+    privateKeySecretRef:
+      name: acme-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik

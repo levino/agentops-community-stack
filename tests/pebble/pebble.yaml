@@ -1,0 +1,86 @@
+# Pebble — Let's Encrypt's test ACME server, deployed in-cluster for CI.
+# cert-manager's ClusterIssuer points here when acme_environment == "pebble".
+# Pebble validates HTTP-01 challenges against port 80 of whatever the
+# challenge domain resolves to (cluster DNS), i.e. through the real Traefik.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pebble
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pebble-config
+  namespace: pebble
+data:
+  pebble-config.json: |
+    {
+      "pebble": {
+        "listenAddress": "0.0.0.0:14000",
+        "managementListenAddress": "0.0.0.0:15000",
+        "certificate": "/test/certs/localhost/cert.pem",
+        "privateKey": "/test/certs/localhost/key.pem",
+        "httpPort": 80,
+        "tlsPort": 443,
+        "ocspResponderURL": "",
+        "externalAccountBindingRequired": false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pebble
+  template:
+    metadata:
+      labels:
+        app: pebble
+    spec:
+      containers:
+        - name: pebble
+          image: ghcr.io/letsencrypt/pebble:2.9.0
+          # The image's entrypoint is the pebble binary itself; only pass flags.
+          args: ["-config", "/etc/pebble/pebble-config.json"]
+          env:
+            # No artificial validation delays in CI.
+            - name: PEBBLE_VA_NOSLEEP
+              value: "1"
+          ports:
+            - name: acme
+              containerPort: 14000
+            - name: mgmt
+              containerPort: 15000
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pebble
+          readinessProbe:
+            tcpSocket:
+              port: 14000
+            initialDelaySeconds: 2
+            periodSeconds: 3
+      volumes:
+        - name: config
+          configMap:
+            name: pebble-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  selector:
+    app: pebble
+  ports:
+    - name: acme
+      port: 14000
+      targetPort: 14000
+    - name: mgmt
+      port: 15000
+      targetPort: 15000

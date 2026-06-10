@@ -1,0 +1,129 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: zitadel
+  namespace: flux-system
+spec:
+  interval: 1h
+  type: oci
+  url: oci://ghcr.io/zitadel/zitadel-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: zitadel
+  namespace: zitadel
+spec:
+  interval: 10m
+  timeout: 15m
+  dependsOn:
+    - name: zitadel-postgresql
+  chart:
+    spec:
+      chart: zitadel
+      version: '9.34.1'
+      sourceRef:
+        kind: HelmRepository
+        name: zitadel
+        namespace: flux-system
+  values:
+    # First start is slow (init + setup jobs); chart default of 300s is too
+    # tight to debug auth loops. See runbooks/incidents/zitadel-bootstrap.md §6.
+    initJob:
+      activeDeadlineSeconds: 900
+    setupJob:
+      activeDeadlineSeconds: 900
+
+    # DB passwords via env vars from the SealedSecret zitadel-db-credentials.
+    # The ExistingSecret blocks under configmapConfig.Database.Postgres are
+    # rendered literally by the chart and NOT turned into env vars — ZITADEL
+    # cannot read k8s secrets itself. See incidents/zitadel-bootstrap.md §5.
+    env:
+      - name: ZITADEL_DATABASE_POSTGRES_USER_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: zitadel-db-credentials
+            key: password
+      - name: ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: zitadel-db-credentials
+            key: postgresPassword
+      # Login v2 as system-wide default — `/` then redirects to /ui/v2/login
+      # instead of the legacy login UI.
+      - name: ZITADEL_FEATURES_LOGINV2_REQUIRED
+        value: "true"
+      - name: ZITADEL_FEATURES_LOGINV2_BASEURI
+        value: "https://id.{{ domain }}/ui/v2/login"
+
+    zitadel:
+      masterkeySecretName: zitadel-masterkey
+      configmapConfig:
+        ExternalDomain: id.{{ domain }}
+        ExternalPort: 443
+        ExternalSecure: true
+        TLS:
+          Enabled: false
+        Database:
+          Postgres:
+            Host: zitadel-postgresql
+            Port: 5432
+            Database: zitadel
+            MaxOpenConns: 20
+            MaxIdleConns: 10
+            MaxConnLifetime: 30m
+            MaxConnIdleTime: 5m
+            User:
+              Username: zitadel
+              SSL:
+                Mode: disable
+              # Password via env ZITADEL_DATABASE_POSTGRES_USER_PASSWORD
+            Admin:
+              Username: postgres
+              SSL:
+                Mode: disable
+              # Password via env ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD
+        # The setup job creates the machine user `iam-admin` (chart default)
+        # and stores its JWT profile as k8s secret zitadel/iam-admin — that
+        # is the credential OpenTofu uses (tofu/zitadel/README.md).
+
+    replicaCount: 1
+
+    ingress:
+      enabled: true
+      className: traefik
+      annotations:
+        cert-manager.io/cluster-issuer: acme
+      hosts:
+        - host: id.{{ domain }}
+          paths:
+            - path: /
+              pathType: Prefix
+      tls:
+        - secretName: zitadel-tls
+          hosts:
+            - id.{{ domain }}
+
+    # Login UI v2 runs as its own pod (zitadel-login, port 3000) and needs a
+    # separate ingress under /ui/v2/login — otherwise the main ingress routes
+    # everything to the zitadel pod and the login UI is unreachable.
+    login:
+      ingress:
+        enabled: true
+        className: traefik
+        annotations:
+          cert-manager.io/cluster-issuer: acme
+        hosts:
+          - host: id.{{ domain }}
+            paths:
+              - path: /ui/v2/login
+                pathType: Prefix
+        tls:
+          - secretName: zitadel-tls
+            hosts:
+              - id.{{ domain }}
+
+    # Postgres runs as a separate HelmRelease (postgres.yaml) — see the
+    # comment there.
+    postgresql:
+      enabled: false

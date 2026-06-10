@@ -1,0 +1,67 @@
+terraform {
+  required_providers {
+    zitadel = {
+      source  = "zitadel/zitadel"
+      version = "~> 2.0"
+    }
+  }
+}
+
+# One org = the community = the shared identity pool. One person, one
+# account, usable across every association.
+resource "zitadel_org" "community" {
+  name = var.community_name
+}
+
+# One project per association.
+resource "zitadel_project" "association" {
+  for_each = { for a in var.associations : a.name => a }
+
+  org_id                   = zitadel_org.community.id
+  name                     = each.key
+  project_role_assertion   = true
+  project_role_check       = false
+  has_project_check        = false
+  private_labeling_setting = "PRIVATE_LABELING_SETTING_UNSPECIFIED"
+}
+
+locals {
+  project_roles = flatten([
+    for a in var.associations : [
+      for r in a.roles : {
+        association = a.name
+        role        = r
+      }
+    ]
+  ])
+
+  managers = flatten([
+    for association, user_ids in var.managers : [
+      for user_id in user_ids : {
+        association = association
+        user_id     = user_id
+      }
+    ]
+  ])
+}
+
+# Roles per project — asserted into tokens as claims.
+resource "zitadel_project_role" "role" {
+  for_each = { for pr in local.project_roles : "${pr.association}/${pr.role}" => pr }
+
+  org_id       = zitadel_org.community.id
+  project_id   = zitadel_project.association[each.value.association].id
+  role_key     = each.value.role
+  display_name = each.value.role
+}
+
+# Boards as project managers: self-service for their own members, no access
+# to anything else.
+resource "zitadel_project_member" "manager" {
+  for_each = { for m in local.managers : "${m.association}/${m.user_id}" => m }
+
+  org_id     = zitadel_org.community.id
+  project_id = zitadel_project.association[each.value.association].id
+  user_id    = each.value.user_id
+  roles      = ["PROJECT_OWNER"]
+}

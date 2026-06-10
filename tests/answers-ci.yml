@@ -1,0 +1,16 @@
+# Copier answers for the CI-generated derivative.
+# Documentation values only (RFC 2606 / RFC 5737) — never a real deployment.
+community_name: Testville
+project_name: testville-infra
+domain: testville.example
+server_ipv4: 203.0.113.10
+acme_email: ops@testville.example
+github_owner: testville
+target_arch: amd64
+container_registry: ghcr.io
+acme_environment: pebble
+associations:
+  - name: sports-club
+    roles: [member, board, treasurer]
+  - name: village-care
+    roles: [member, lead]
