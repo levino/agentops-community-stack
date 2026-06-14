@@ -23,12 +23,23 @@ Read this file first. For any non-trivial operation there is a runbook:
 2. **Never `cluster-admin` for CI/OIDC identities.** CI identities get the
    `preview-deployer` ClusterRole via namespace-scoped RoleBinding only
    (`scripts/new-app.sh` does this correctly).
-3. **Secrets enter this repo only as SealedSecrets.** Never commit
-   plaintext secrets, never echo generated secrets into logs. Seal offline
-   against `sealed-secrets-public-key.pem`.
-4. **Images must run on {{ target_arch }}.** Build multi-arch
-   (`platforms: linux/amd64,linux/arm64`) or pin {{ target_arch }} images.
-   A pull that works on your machine proves nothing.
+3. **App-bound secrets enter this repo only as SealedSecrets** (OIDC client
+   credentials, cookie secrets — they belong to an app and rotate with it).
+   Seal offline against `sealed-secrets-public-key.pem`.
+   **Operational access tokens (PATs) NEVER enter the repo — not even
+   sealed.** A PAT is a broad, long-lived credential; sealing it leaves a
+   permanent encrypted blob in git history and couples a personal token to
+   the repo. Create such credentials directly in the cluster
+   (`kubectl create secret …`) and record the command in a runbook so the
+   cluster can be rebuilt. This is the one sanctioned exception to invariant
+   1. Never commit plaintext secrets, never echo secrets into logs.
+4. **Images must run on {{ target_arch }} — built on NATIVE runners, never
+   QEMU.** Build each architecture on its own native GitHub runner
+   (`ubuntu-24.04-arm` for arm64, `ubuntu-latest` for amd64) and merge them
+   into one manifest list with `docker buildx imagetools create`. Do NOT use
+   QEMU/cross-emulation (`docker/setup-qemu-action`, or a single-job
+   `platforms: linux/amd64,linux/arm64` build) — it is slow and has shipped
+   broken images here. A pull that works on your machine proves nothing.
 5. **Identity is declarative.** Orgs, projects, roles, OIDC clients live in
    `tofu/zitadel/` — not in the ZITADEL UI. UI is for humans doing
    self-service member management, nothing else.
@@ -46,7 +57,7 @@ Read this file first. For any non-trivial operation there is a runbook:
 | `zitadel/` | ZITADEL + Postgres + sealed bootstrap secrets | Flux (separate Kustomization — fails until secrets are sealed) |
 | `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Flux |
 | `tofu/zitadel/` | identity as code (org/projects/roles/clients) | `tofu apply` (local) |
-| `patterns/` | copyable recipes: native OIDC, ForwardAuth | read, copy, adapt |
+| `patterns/` | copyable recipes: native OIDC, ForwardAuth, app deploy CI | read, copy, adapt |
 | `runbooks/` | bootstrap + incidents | read |
 
 ## Verify commands (use these before declaring anything healthy)
