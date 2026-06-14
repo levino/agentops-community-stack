@@ -63,3 +63,31 @@ flags to the shared oauth2-proxy deployment, and set `absolute_redirect off;` /
 
 For a site that wants a public, link-preview-friendly front page while keeping
 content protected, see `patterns/public-landing-protected/`.
+
+## Session lifetime: stay logged in (e.g. 30 days) with sliding refresh
+
+Internal, low-sensitivity sites should not force a re-login every few hours
+(that is exactly when users hit the ugly oauth2-proxy 403 page). For a 30-day
+session that silently refreshes whenever the user returns, **three things must
+line up** — getting only one or two of them is the usual cause of "logs me out
+too soon":
+
+1. **oauth2-proxy** flags:
+   ```
+   --cookie-expire=720h          # 30d session cookie
+   --cookie-refresh=1h           # refresh the tokens periodically; MUST be < the
+                                 # IdP access-token lifetime, else refresh fails
+   --scope=openid email profile offline_access   # offline_access ⇒ refresh token
+   ```
+2. **The ZITADEL OIDC app must allow the refresh-token grant.** Without it,
+   `offline_access` yields no refresh token and `--cookie-refresh` silently
+   forces a re-login. The app's `grantTypes` must include
+   `OIDC_GRANT_TYPE_REFRESH_TOKEN` (set it via the API — identity is API-managed,
+   inv. 6 — alongside `OIDC_GRANT_TYPE_AUTHORIZATION_CODE`).
+3. **ZITADEL refresh-token idle expiration ≥ the session length.** The default
+   is 30 days, so a 720h cookie matches out of the box; only touch the instance
+   OIDC token settings if you want longer.
+
+Note: `--cookie-refresh` set *larger* than the access-token lifetime is a footgun
+— the access token expires before oauth2-proxy refreshes, producing exactly the
+premature logout you were trying to avoid. Keep it comfortably below it.
