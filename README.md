@@ -1,4 +1,4 @@
-# citadel-stack-template
+# agentops-community-stack
 
 > **Status: concept / draft.** This repo describes an intention, not (yet) a
 > finished implementation. It captures the plan before code exists.
@@ -162,7 +162,7 @@ ordinary GitHub repo; the **generated repo** lands in the user's account.
 
 ```bash
 # A community generates its infra stack — needs nothing but uvx:
-uvx copier copy gh:levino/citadel-stack-template ./my-infra
+uvx copier copy gh:levino/agentops-community-stack ./my-infra
   # → Copier asks: domain? server IP? org name? which clubs? registry? …
   # → produces ./my-infra with everything filled in (Jinja placeholders)
 
@@ -189,7 +189,7 @@ but that is exactly the point).
 
 ```
         ┌──────────────────────────┐
-        │  citadel-stack-template  │  ← the truth
+        │ agentops-community-stack │  ← the truth
         └───────────┬──────────────┘
    copier update    │   PR "promote learning"
    (automatic)      │   (human/agent judgment)
@@ -257,7 +257,7 @@ agent bootstraps a real throwaway VPS following only `AGENTS.md` +
 ## 9. Planned repo layout
 
 ```
-citadel-stack-template/
+agentops-community-stack/
 ├── README.md                  # this document (vision + concept)
 ├── IMPLEMENTATION.md          # milestone plan (what to build, in which order)
 ├── copier.yml                 # template questions (domain, IP, org, clubs, …)
