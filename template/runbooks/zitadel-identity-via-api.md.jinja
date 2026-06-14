@@ -1,0 +1,80 @@
+# ZITADEL identity content — managed via the API, not git
+
+All identity **content** — projects, roles, OIDC clients, external IdPs and
+**above all who is in which group/role (user grants)** — is managed at runtime
+through the ZITADEL API/console, never committed (invariant 6: GDPR + churn).
+This runbook is how an agent does that work safely.
+
+## The operator credential (per session, never stored)
+
+The API credential is a **ZITADEL service-user PAT held by the operator** and
+used **per session** — exported into the shell for one batch of work, then
+discarded. It is an infrastructure credential (invariants 3 + 6):
+
+- **never** committed (not plaintext, not sealed);
+- **never** stored in the cluster — no service-account key, no PAT as a k8s
+  secret.
+
+Mint it in the console: Instance → Service Users → create a service user →
+grant it the IAM-owner (or a narrower) manager role → generate a **Personal
+Access Token**. Then for the session:
+
+```bash
+export ZITADEL_TOKEN="<service-user-PAT>"
+export ZITADEL_HOST="https://id.{{ domain }}"
+```
+
+Helper for the calls below:
+
+```bash
+zreq() { curl -fsS -H "Authorization: Bearer $ZITADEL_TOKEN" \
+  -H 'Content-Type: application/json' "$ZITADEL_HOST$@"; }
+```
+
+> **Anti-pattern (do not):** extracting the chart's `iam-admin` key and
+> parking it on disk or as a k8s secret as a standing admin credential. Mint a
+> scoped PAT, use it, discard it.
+
+## Common operations
+
+### Create a project / role
+
+```bash
+# project (in the community org)
+zreq /management/v1/projects -d '{"name":"sports-club","projectRoleAssertion":true}'
+# role on it
+zreq /management/v1/projects/<project-id>/roles \
+  -d '{"roleKey":"board","displayName":"board"}'
+```
+
+### Grant a user a role (membership) — never in git
+
+```bash
+zreq /management/v1/users/<user-id>/grants \
+  -d '{"projectId":"<project-id>","roleKeys":["board"]}'
+```
+
+This is exactly the personal data that must stay out of version control.
+
+### Create an OIDC client for an app
+
+See `patterns/app-native-oidc/` for the field values; create it via
+`/management/v1/projects/<project-id>/apps/oidc`, read back the client
+secret **once**, and wire it into the app as a SealedSecret (app secrets are
+the one thing that goes in git — invariant 3).
+
+## Related patterns
+
+- Force Login v2 instance-wide + external-IdP callback URIs:
+  `patterns/zitadel-login-v2/`
+- External IdP (Google) for members-only, auto-linking pitfalls, custom login
+  policy not inheriting instance IdPs: `patterns/zitadel-external-idp/`
+- Flatten nested role claims into a `groups` claim for oauth2-proxy:
+  `patterns/zitadel-role-groups/`
+
+## Rebuild note
+
+Identity content is reconstructed against the running instance via these API
+calls (or the console), not from git. Keep an out-of-band record of the
+intended projects/roles (e.g. in the human-facing docs); membership is
+re-established by the members themselves / the board via self-service.
