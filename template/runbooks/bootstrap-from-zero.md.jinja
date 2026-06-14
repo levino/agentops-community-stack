@@ -130,25 +130,31 @@ kubectl get certificates -A             # all Ready=True
 curl -fsSI https://id.{{ domain }} > /dev/null && echo TLS OK
 ```
 
-## 5. Identity as code
+## 5. ZITADEL bootstrap (instance/org only — NOT identity content)
+
+This stands up the org and the first admin user. **Identity content** —
+projects, roles, OIDC clients and above all who is in which role — is **not**
+done here: it is API-managed at runtime (invariant 6,
+`runbooks/zitadel-identity-via-api.md`). Do not commit memberships to tofu.
+
+Mint an operator service-user PAT/key in the ZITADEL console (Instance →
+Service Users → IAM-owner), provide it **per session** (never commit it, never
+store it in the cluster as a standing credential), then:
 
 ```bash
 kubectl create namespace terraform-state
-kubectl get secret -n zitadel iam-admin \
-  -o jsonpath='{.data.iam-admin\.json}' | base64 -d > tofu/zitadel/service-user.json
-chmod 600 tofu/zitadel/service-user.json
-cd tofu/zitadel && tofu init && tofu apply
+cd tofu/zitadel && tofu init && tofu apply   # provider reads the per-session operator credential
 ```
 
 **Verify:**
 
 ```bash
-tofu output project_ids                    # one ID per association
 tofu output -raw admin_initial_password    # read once, store in password manager
 ```
 
 Log in at `https://id.{{ domain }}` as `admin` with that password (forced
-change on first login).
+change on first login), then do all further identity work via the console /
+API — `runbooks/zitadel-identity-via-api.md`.
 
 ## 6. ForwardAuth front door (optional but recommended)
 

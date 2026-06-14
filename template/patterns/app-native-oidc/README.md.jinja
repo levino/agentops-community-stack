@@ -8,11 +8,22 @@ fine-grained authorization per resource.
 For third-party apps that cannot do their own auth, use
 `patterns/app-forwardauth/` instead.
 
-## 1. OIDC client (identity as code)
+## 1. OIDC client
 
-Add a file `tofu/zitadel/<app>.tf` — the client lives in the project of the
-association the app belongs to (role claims of that project end up in the
-tokens):
+The OIDC client is **identity content** — create it via the ZITADEL
+API/console (invariant 6), in the project of the association the app belongs
+to so that project's role claims end up in the tokens. The client config you
+want is:
+
+- `app_type: OIDC_APP_TYPE_WEB`, `response_types: [CODE]`,
+  grant types `AUTHORIZATION_CODE` + `REFRESH_TOKEN`, `auth_method: BASIC`;
+- `redirect_uris: ["https://myapp.{{ domain }}/auth/callback"]`,
+  `post_logout_redirect_uris: ["https://myapp.{{ domain }}/"]`;
+- `access_token_role_assertion`, `id_token_role_assertion`,
+  `id_token_userinfo_assertion` all `true`.
+
+The equivalent tofu resource — handy only for the one-time bootstrap or the CI
+harness, **not** as a standing source of truth for content (invariant 6):
 
 ```hcl
 resource "zitadel_application_oidc" "myapp_web" {
@@ -83,7 +94,10 @@ as a claim:
 "urn:zitadel:iam:org:project:roles": { "board": { "...": "..." } }
 ```
 
-The app checks the claim — e.g. `board` may edit, `member` may read.
+The app checks the claim — e.g. `board` may edit, `member` may read. (A
+self-built app can read this nested claim directly. Generic middleware like
+oauth2-proxy cannot — for that, flatten roles into a `groups` claim with a
+ZITADEL Action: see `patterns/zitadel-role-groups/`.)
 Rich domain data (membership fees, join dates) does NOT belong in ZITADEL:
 keep it in the app's database, keyed by the token's `sub` (ZITADEL = IdP,
 not CRM — hard invariant).

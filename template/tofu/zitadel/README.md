@@ -1,18 +1,53 @@
-# tofu/zitadel — identity as code
+# tofu/zitadel — ZITADEL bootstrap (instance/org only)
 
-OpenTofu configuration for the ZITADEL instance. Manages **external state**
-(org, projects, roles, OIDC clients, users) via the ZITADEL API. **Not**
-managed here: the ZITADEL deployment itself — that is Flux (`zitadel/`).
+> **Identity CONTENT is NOT managed here.** Projects, roles, OIDC clients,
+> external IdPs and — above all — **who is in which group/role (user grants)**
+> are managed through the **ZITADEL API at runtime**, never in tofu/git
+> (invariant 6, `AGENTS.md`). This directory is, at most, the **bare
+> instance/org bootstrap**. The day-to-day identity work lives in
+> `runbooks/zitadel-identity-via-api.md` and `patterns/`.
 
-Identity is declarative. No UI clicking for anything that lives here
-(hard invariant, see `AGENTS.md`).
+## Why content is not code (read before "improving" this)
+
+1. **GDPR.** Membership and role grants are personal data about real people.
+   In version control they are practically impossible to delete (history,
+   forks, clones, CI caches, tofu state) — exactly what data-protection law
+   forbids for personal data. It must therefore never enter git.
+2. **Churn.** Members join and leave, roles change weekly. A code-review loop
+   for every grant is the wrong tool; the ZITADEL console/API is the right one.
+
+So tofu here is intentionally tiny and **run once**: enough to stand the
+instance and org up so a human admin can log in and take over via the console
+and the API. Everything after that is API/console work, documented as
+runbooks, not committed as state.
+
+## The API credential — operator-held, never in the cluster
+
+The credential used to drive the ZITADEL API is a **service-user PAT held by
+the operator** and passed **per session** (e.g. exported into the shell for
+one `tofu apply` or one batch of API calls). It is an **infrastructure
+credential** (invariants 3 + 6):
+
+- **never** stored in the cluster — no service-account key, no PAT as a k8s
+  secret;
+- **never** committed — not plaintext, not sealed.
+
+> **Anti-pattern (removed):** earlier versions extracted the chart's
+> `iam-admin` service-account key from a k8s secret and parked it on disk /
+> in the cluster as the standing provider credential. Do **not** do this.
+> Mint a scoped service-user PAT, use it for the session, discard it.
+
+Trade-off, accepted and documented: the API credential is not reproducible
+from git. At cluster rebuild you mint a fresh operator PAT by hand (see the
+runbook). That is the correct cost of keeping personal data and standing
+admin credentials out of the repo.
 
 ## Bootstrap (once, after the first ZITADEL deploy)
 
 ZITADEL must be running (`flux get helmrelease zitadel -n zitadel` →
-Ready=True). The chart's setup job automatically creates an IAM-owner
-service user `iam-admin` and stores its JWT profile as a k8s secret —
-exactly the format the provider expects. No UI involved.
+Ready=True). Mint an operator service-user PAT in the ZITADEL console
+(Instance → Service Users → create → generate **Personal Access Token**, give
+it IAM-owner manager role), then provide it to the provider **per session**:
 
 1. Create the state namespace (once):
 
@@ -20,20 +55,14 @@ exactly the format the provider expects. No UI involved.
    kubectl create namespace terraform-state
    ```
 
-2. Pull the service-user key from the cluster:
+2. Export the operator PAT for this session only (never written to git, never
+   stored in the cluster):
 
    ```bash
-   kubectl get secret -n zitadel iam-admin \
-     -o jsonpath='{.data.iam-admin\.json}' | base64 -d > service-user.json
-   chmod 600 service-user.json
+   export ZITADEL_TOKEN="<operator-service-user-PAT>"
    ```
 
-   The file is gitignored. If the key is ever compromised: delete the
-   secret, re-run the setup job (`kubectl delete job -n zitadel
-   zitadel-setup`, `flux reconcile helmrelease zitadel -n zitadel`) — it
-   recreates the secret.
-
-3. First apply:
+3. Apply the bootstrap:
 
    ```bash
    tofu init
@@ -47,25 +76,32 @@ exactly the format the provider expects. No UI involved.
    tofu output -raw admin_initial_password
    ```
 
+From here, log in at `https://id.{{ domain }}` as `admin` and do all further
+identity work through the console / API (`runbooks/zitadel-identity-via-api.md`).
+
 ## State
 
 Backend: `kubernetes` secret in namespace `terraform-state`. Access requires
-cluster access — the same trust boundary as `kubectl`. The state contains
-plaintext secrets (client secrets, initial passwords); sealed-secrets
-protection does **not** apply here.
+cluster access — the same trust boundary as `kubectl`. Because content lives
+in the API and not in tofu, the state stays small and contains **no personal
+membership data**. It may still contain the bootstrap admin's initial password
+output; treat it as sensitive.
 
-## What is managed here
+## What is (and is not) managed here
 
-- `modules/community` — org = community, one project per association,
-  roles per project, boards as project managers (`community.tf`)
-- the first admin user (`admin.tf`)
-- the `infrastructure` project with the `forwardauth` OIDC client for
-  oauth2-proxy (`forwardauth.tf`)
-- one OIDC client per native-OIDC app — add as needed, recipe in
-  `patterns/app-native-oidc/`
+Managed (bootstrap only):
 
-## Drift workflow
+- the org = the community (the shared identity pool)
+- the first admin user as `ORG_OWNER` (`admin.tf`) — the human who then takes
+  over via the console
 
-Local `tofu plan` is the truth. Runs locally for now; moving it to CI
-(GitHub Actions OIDC → ZITADEL API) is an option once the setup is stable —
-the CI harness of the template already exercises `tofu apply` end to end.
+**Not** managed here (API/console at runtime — invariant 6):
+
+- projects, roles, OIDC clients
+- user grants / who is in which group or role
+- external IdPs (Google etc.) and login policy — see
+  `patterns/zitadel-login-v2/` and `patterns/zitadel-external-idp/`
+
+For an app that needs its own OIDC client or role claims, create the client
+via the API/console and wire the credentials in as a SealedSecret next to the
+app — recipe in `patterns/app-native-oidc/`.

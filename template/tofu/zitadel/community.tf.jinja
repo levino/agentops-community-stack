@@ -1,3 +1,11 @@
+# NOTE (invariant 6): identity CONTENT — projects, roles and especially user
+# grants (who is in which role) — is API-managed at runtime, NOT in tofu/git
+# (GDPR + churn; see README.md). The project/role scaffolding below is a
+# convenience for the *initial* bootstrap and the CI harness only; do NOT add
+# user grants / memberships here. Real membership work happens via the ZITADEL
+# API/console — see runbooks/zitadel-identity-via-api.md. `managers` stays
+# empty in git on a real instance.
+#
 # The identity model: one org = the community (shared identity pool),
 # one project per association, roles per project. See README.md.
 module "community" {
