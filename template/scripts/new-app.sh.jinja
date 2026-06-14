@@ -69,9 +69,13 @@ spec:
   url: ${REPO}
   ref:
     branch: main
-  # For private repositories, point this at a secret with credentials:
+  # For a PRIVATE app repo, Flux needs read credentials. Create the secret
+  # DIRECTLY in the cluster — never seal a PAT into git (AGENTS.md inv. 3):
+  #   kubectl create secret generic ${NAME}-git -n flux-system \\
+  #     --from-literal=username=<bot> --from-literal=password=<read-only-PAT>
+  # then uncomment:
   # secretRef:
-  #   name: flux-system
+  #   name: ${NAME}-git
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
