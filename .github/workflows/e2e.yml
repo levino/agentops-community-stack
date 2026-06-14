@@ -102,7 +102,7 @@ jobs:
         run: |
           # Same shape as a real node: bundled Traefik/servicelb disabled,
           # our own Traefik binds 80/443 via hostPort.
-          k3d cluster create citadel \
+          k3d cluster create agentops \
             --no-lb \
             -p "80:80@server:0:direct" -p "443:443@server:0:direct" \
             --k3s-arg "--disable=traefik@server:0" \
