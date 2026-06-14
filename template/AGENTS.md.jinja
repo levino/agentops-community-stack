@@ -23,16 +23,20 @@ Read this file first. For any non-trivial operation there is a runbook:
 2. **Never `cluster-admin` for CI/OIDC identities.** CI identities get the
    `preview-deployer` ClusterRole via namespace-scoped RoleBinding only
    (`scripts/new-app.sh` does this correctly).
-3. **App-bound secrets enter this repo only as SealedSecrets** (OIDC client
-   credentials, cookie secrets — they belong to an app and rotate with it).
-   Seal offline against `sealed-secrets-public-key.pem`.
-   **Operational access tokens (PATs) NEVER enter the repo — not even
-   sealed.** A PAT is a broad, long-lived credential; sealing it leaves a
-   permanent encrypted blob in git history and couples a personal token to
-   the repo. Create such credentials directly in the cluster
-   (`kubectl create secret …`) and record the command in a runbook so the
-   cluster can be rebuilt. This is the one sanctioned exception to invariant
-   1. Never commit plaintext secrets, never echo secrets into logs.
+3. **Flux git authentication is ALWAYS a GitHub App — NEVER a PAT.** Create
+   one GitHub App per instance, named `Server {{ community_name }}` (or
+   `Server <org>`), install it on every org whose repos Flux must read
+   (`contents: read`), and reference it from `GitRepository` via
+   `provider: github` + a secret holding `githubAppID` /
+   `githubAppInstallationID` / `githubAppPrivateKey`. The installation ID is
+   per-org; the private key is shared across installs. A GitHub App is
+   scoped, centrally revocable and mints short-lived tokens — a PAT is a
+   broad, personal, long-lived credential and must not be used.
+   **All secrets enter this repo only as SealedSecrets** — app OIDC creds,
+   cookie secrets, and the Flux App credentials alike (App creds, unlike a
+   PAT, are infrastructure and may be versioned sealed). Seal offline against
+   `sealed-secrets-public-key.pem`. Never commit plaintext, never echo
+   secrets into logs.
 4. **Images must run on {{ target_arch }} — built on NATIVE runners, never
    QEMU.** Build each architecture on its own native GitHub runner
    (`ubuntu-24.04-arm` for arm64, `ubuntu-latest` for amd64) and merge them
