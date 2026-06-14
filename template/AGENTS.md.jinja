@@ -11,9 +11,13 @@ Read this file first. For any non-trivial operation there is a runbook:
 
 - Build everything from scratch: `runbooks/bootstrap-from-zero.md`
 - Known footguns (read BEFORE debugging): `runbooks/incidents/`
+- Flux git auth (GitHub App, per-org secret): `runbooks/flux-github-app.md`
 - ZITADEL bootstrap secrets: `zitadel/SECRETS.md`
-- Identity as code: `tofu/zitadel/README.md`
+- ZITADEL identity content (API, not git): `runbooks/zitadel-identity-via-api.md`
+- Identity bootstrap (tofu, minimal): `tofu/zitadel/README.md`
 - Adding apps: `apps/README.md` and `patterns/`
+- Login v2, external IdPs, role→groups, oauth2-proxy+nginx, public/protected
+  sites: `patterns/`
 
 ## Invariants (hard rules — never break, never "temporarily" bypass)
 
@@ -23,33 +27,54 @@ Read this file first. For any non-trivial operation there is a runbook:
 2. **Never `cluster-admin` for CI/OIDC identities.** CI identities get the
    `preview-deployer` ClusterRole via namespace-scoped RoleBinding only
    (`scripts/new-app.sh` does this correctly).
-3. **Flux git authentication is ALWAYS a GitHub App — NEVER a PAT.** Create
+3. **Two classes of secret, two homes — never mix them.**
+   - **Service/app secrets** (third-party API keys, database passwords, an
+     app's own OIDC client secret, the oauth2-proxy cookie secret) belong to
+     an app and rotate with it. These — and ONLY these — enter the repo as
+     **SealedSecrets**: seal offline against `sealed-secrets-public-key.pem`,
+     commit the sealed blob next to the app.
+   - **Infrastructure credentials** (above all the Flux git-auth GitHub App
+     key — see inv. 4 — and any ZITADEL operator credential — see inv. 6)
+     live **ONLY in the cluster**, created directly with `kubectl` — **NEVER
+     in git, not even sealed.** A sealed infra credential leaves a permanent
+     encrypted blob in history forever and is not what SealedSecrets are for.
+     Accepted trade-off (documented, not a bug): these secrets are **not**
+     reproducible from git and must be **recreated by hand at cluster
+     rebuild** — the bootstrap and `runbooks/flux-github-app.md` cover how.
+   Never commit plaintext, never echo secrets into logs.
+4. **Flux git authentication is ALWAYS a GitHub App — NEVER a PAT.** Create
    one GitHub App per instance, named `Server {{ community_name }}` (or
-   `Server <org>`), install it on every org whose repos Flux must read
-   (`contents: read`), and reference it from `GitRepository` via
-   `provider: github` + a secret holding `githubAppID` /
+   `Server <org>`), install it **separately on every org** whose repos Flux
+   must read (`contents: read`), and reference it from each `GitRepository`
+   via `provider: github` + a secret holding `githubAppID` /
    `githubAppInstallationID` / `githubAppPrivateKey`. The installation ID is
-   per-org; the private key is shared across installs. A GitHub App is
-   scoped, centrally revocable and mints short-lived tokens — a PAT is a
-   broad, personal, long-lived credential and must not be used.
-   **All secrets enter this repo only as SealedSecrets** — app OIDC creds,
-   cookie secrets, and the Flux App credentials alike (App creds, unlike a
-   PAT, are infrastructure and may be versioned sealed). Seal offline against
-   `sealed-secrets-public-key.pem`. Never commit plaintext, never echo
-   secrets into logs.
-4. **Images must run on {{ target_arch }} — built on NATIVE runners, never
+   **per-org** (one Flux secret per org, same key, that org's installation
+   ID); the private key is shared across installs. A GitHub App is scoped,
+   centrally revocable and mints short-lived tokens — a PAT is a broad,
+   personal, long-lived credential and must not be used. These App secrets
+   are infrastructure credentials: created directly in the cluster, never
+   committed (inv. 3). Full recipe: `runbooks/flux-github-app.md`.
+5. **Images must run on {{ target_arch }} — built on NATIVE runners, never
    QEMU.** Build each architecture on its own native GitHub runner
    (`ubuntu-24.04-arm` for arm64, `ubuntu-latest` for amd64) and merge them
    into one manifest list with `docker buildx imagetools create`. Do NOT use
    QEMU/cross-emulation (`docker/setup-qemu-action`, or a single-job
    `platforms: linux/amd64,linux/arm64` build) — it is slow and has shipped
    broken images here. A pull that works on your machine proves nothing.
-5. **Identity is declarative.** Orgs, projects, roles, OIDC clients live in
-   `tofu/zitadel/` — not in the ZITADEL UI. UI is for humans doing
-   self-service member management, nothing else.
-6. **ZITADEL is an IdP, not a CRM.** Domain data (fees, join dates,
+6. **ZITADEL identity content is API-managed at runtime — NOT in tofu/git.**
+   Projects, roles, OIDC clients, external IdPs and **above all who is in
+   which group/role (user grants)** are managed through the **ZITADEL API**,
+   not committed as code. Two reasons: (a) **GDPR** — personal membership
+   data must never live in version control (it is hard to delete, gets
+   replicated, persists in history); (b) it changes far too often for a code
+   loop. `tofu/zitadel/` holds at most the bare instance/org bootstrap. The
+   API credential is a ZITADEL **service-user PAT held by the operator** and
+   passed per session — it is **never stored in the cluster** (no
+   service-account key, no PAT as a k8s secret). See `tofu/zitadel/README.md`
+   and `runbooks/zitadel-identity-via-api.md`.
+7. **ZITADEL is an IdP, not a CRM.** Domain data (fees, join dates,
    membership numbers) belongs in app databases, keyed by the token `sub`.
-7. **Single node, single replica is a feature** (cheap infra). Do not add
+8. **Single node, single replica is a feature** (cheap infra). Do not add
    HA machinery.
 
 ## Layout
@@ -60,9 +85,9 @@ Read this file first. For any non-trivial operation there is a runbook:
 | `cluster/` | substrate: traefik, cert-manager, sealed-secrets, rbac | Flux |
 | `zitadel/` | ZITADEL + Postgres + sealed bootstrap secrets | Flux (separate Kustomization — fails until secrets are sealed) |
 | `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Flux |
-| `tofu/zitadel/` | identity as code (org/projects/roles/clients) | `tofu apply` (local) |
-| `patterns/` | copyable recipes: native OIDC, ForwardAuth, app deploy CI | read, copy, adapt |
-| `runbooks/` | bootstrap + incidents | read |
+| `tofu/zitadel/` | ZITADEL **bootstrap only** (instance/org); identity content is API-managed (inv. 6) | `tofu apply` (local), once |
+| `patterns/` | copyable recipes: native OIDC, ForwardAuth, login v2, external IdP, role→groups, oauth2-proxy+nginx, public/protected sites, app deploy CI | read, copy, adapt |
+| `runbooks/` | bootstrap, Flux GitHub App, ZITADEL-via-API, incidents | read |
 
 ## Verify commands (use these before declaring anything healthy)
 

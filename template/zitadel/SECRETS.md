@@ -7,8 +7,23 @@ Two secrets must exist before Flux can reconcile `helmrelease.yaml`:
 | `zitadel-masterkey` | 32-byte AES key for ZITADEL's internal encryption |
 | `zitadel-db-credentials` | `postgresPassword` (Postgres superuser) + `password` (zitadel app user) |
 
-They are committed **only** as SealedSecrets — never as plaintext (hard
-invariant, see `AGENTS.md`).
+These two are the **only** ZITADEL secrets that belong in git, and only as
+SealedSecrets — never as plaintext (hard invariant, see `AGENTS.md`). They are
+deployment data (the running instance cannot start without them) and carry no
+personal data, so versioning them sealed is correct.
+
+## What does NOT belong here (anti-patterns)
+
+- **No ZITADEL API credential.** The credential the operator uses to manage
+  identity content (PAT, or a service-account key) is an **infrastructure
+  credential**: held by the operator and passed per session, **never stored in
+  the cluster and never committed** (invariants 3 + 6). The old bootstrap that
+  parked an `iam-admin` service-account key/PAT as a k8s secret in the
+  `zitadel` namespace is an **anti-pattern** — do not reintroduce it. See
+  `tofu/zitadel/README.md` and `runbooks/zitadel-identity-via-api.md`.
+- **No identity content.** Projects, roles, OIDC clients and — above all —
+  user/group membership are managed at runtime via the ZITADEL API, never as
+  sealed secrets or tofu state (GDPR; invariant 6).
 
 ## Procedure
 

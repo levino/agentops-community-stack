@@ -11,10 +11,14 @@ spec:
   url: https://github.com/{{ github_owner }}/{{ project_name }}
   ref:
     branch: main
-  # For private repositories, create a secret with a deploy key or PAT and
-  # uncomment:
+  # Private repos: authenticate with the instance's Flux GitHub App — NEVER a
+  # PAT (invariant 4). The secret is created directly in the cluster, never
+  # committed (invariant 3). One secret per ORG: same private key, that org's
+  # installation ID. See runbooks/flux-github-app.md. Uncomment for the org
+  # that owns THIS repo ({{ github_owner }}):
+  provider: github
   # secretRef:
-  #   name: flux-system
+  #   name: {{ github_owner }}-flux-secret
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

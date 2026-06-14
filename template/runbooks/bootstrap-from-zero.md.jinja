@@ -67,16 +67,24 @@ kubectl -n flux-system get pods   # source/kustomize/helm/notification controlle
 
 ## 3. Connect Flux to this repo
 
-If the repo is private, first create credentials (deploy key or PAT):
+If the repo is private, first create the Flux **GitHub App** secret for the
+org that owns it — NEVER a PAT (invariant 4), created directly in the cluster,
+never committed (invariant 3). Full recipe in `runbooks/flux-github-app.md`;
+in short, for `{{ github_owner }}`:
 
 ```bash
-flux create secret git flux-system \
-  --url=https://github.com/{{ github_owner }}/{{ project_name }} \
-  --username=git --password=<PAT>
+kubectl create namespace flux-system 2>/dev/null || true
+INST=$(gh api /orgs/{{ github_owner }}/installations \
+  --jq ".installations[]|select(.app_id==<app-id>).id")
+kubectl create secret generic {{ github_owner }}-flux-secret -n flux-system \
+  --from-literal=githubAppID=<app-id> \
+  --from-literal=githubAppInstallationID="$INST" \
+  --from-file=githubAppPrivateKey=<app-key.pem>
 ```
 
-and uncomment the `secretRef` in `flux/gotk-sync.yaml`. Then — the only
-manual `kubectl apply` in the lifetime of this cluster:
+and uncomment the `secretRef` (and keep `provider: github`) in
+`flux/gotk-sync.yaml`. Then — the only manual `kubectl apply` in the lifetime
+of this cluster:
 
 ```bash
 kubectl apply -k flux/
