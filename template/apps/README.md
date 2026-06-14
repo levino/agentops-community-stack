@@ -39,4 +39,7 @@ deployed once).
 - One namespace per app. CI identities get the `preview-deployer` role in
   their namespace only — never `cluster-admin`.
 - Images must be built for the server architecture (multi-arch builds).
-- Secrets enter this repo only as SealedSecrets.
+- Only **app/service secrets** enter this repo, and only as SealedSecrets.
+  **Infrastructure credentials** (Flux GitHub App key, ZITADEL operator
+  credential) live only in the cluster — never committed, not even sealed
+  (AGENTS.md inv. 3; `runbooks/flux-github-app.md`).

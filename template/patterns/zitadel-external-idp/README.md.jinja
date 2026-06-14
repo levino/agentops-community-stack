@@ -1,0 +1,67 @@
+# Pattern: external IdP (e.g. Google) for a members-only instance
+
+Let members sign in with Google (or any external IdP) **without** turning the
+instance into open self-registration. The model: accounts are pre-provisioned
+(a member already exists in ZITADEL), and Google is used only to **link to and
+authenticate** that existing account — not to create new ones.
+
+All of this is identity content: configure it via the **API/console**, never
+git (invariant 6). Use the operator PAT — `runbooks/zitadel-identity-via-api.md`.
+
+## Provider options that get this exactly right
+
+When you create the Google provider, set:
+
+```jsonc
+{
+  "name": "Google",
+  "options": {
+    "isLinkingAllowed": true,
+    "isAutoCreation": false,                       // do NOT auto-create users
+    "isAutoUpdate": true,
+    "autoLinking": "AUTO_LINKING_OPTION_EMAIL"     // link by verified email
+  }
+}
+```
+
+- `autoLinking: AUTO_LINKING_OPTION_EMAIL` — match the external identity to the
+  pre-provisioned account by email.
+- `isLinkingAllowed: true` — allow that link to be established.
+- `isAutoCreation: false` — never mint a brand-new account from an external
+  login (this is what keeps the instance members-only).
+
+## Pitfalls — name them so you recognise them
+
+- **`isAutoCreation: true` → "user already exists".** Auto-creation collides
+  with the pre-provisioned account that shares the email. Symptom is a hard
+  error mid-login. Fix: `isAutoCreation: false`.
+- **No `autoLinking` → "external user account not found".** Without email
+  auto-linking ZITADEL has no way to map the Google identity onto the existing
+  account, so it reports the external account as unknown. Fix:
+  `autoLinking: AUTO_LINKING_OPTION_EMAIL`.
+
+## An org with a custom login policy does NOT inherit instance IdPs
+
+If the community org has its **own custom login policy** (most do, for
+branding/MFA), it does **not** automatically see IdPs configured at the
+instance level. You must **link the (instance) IdP to that org's login
+policy** as well:
+
+```bash
+# add the instance-level IdP to the org's login policy
+zreq -X POST /management/v1/policies/login/idps -d '{
+  "idpId": "<instance-idp-id>",
+  "ownerType": "IDP_OWNER_TYPE_SYSTEM"
+}'
+```
+
+`ownerType: IDP_OWNER_TYPE_SYSTEM` (i.e. SYSTEM) tells ZITADEL the referenced
+IdP lives at the instance level. Skip this and members on a custom-policy org
+simply never see the Google button.
+
+## Callback URL
+
+Register the correct callback in Google per the active login version — for the
+forced Login v2 it is `https://id.{{ domain }}/idps/callback`. See
+`patterns/zitadel-login-v2/` and confirm the exact `redirect_uri` with
+`POST /v2/idp_intents`.

@@ -1,0 +1,62 @@
+# Pattern: ZITADEL Login v2 — force it instance-wide
+
+ZITADEL ships two login UIs. The new **Login v2** (the separate
+`zitadel-login` deployment, served under `/ui/v2/login`) is the one to use.
+Force it on for the whole instance so every flow — including external-IdP
+callbacks — uses the same, predictable URLs.
+
+This is identity content: set it via the **API or the console**
+(Instance → Features), never in git (invariant 6).
+
+## Force Login v2 on the instance
+
+```bash
+# requires the operator PAT — see runbooks/zitadel-identity-via-api.md
+zreq -X PUT /v2/features/instance -d '{
+  "loginV2": {
+    "required": true,
+    "baseUri": "https://id.{{ domain }}/ui/v2/login"
+  }
+}'
+```
+
+(Or: console → Instance → Features → Login v2 → required, with the same base
+URI.) After this, all human login goes through `/ui/v2/login`.
+
+## External-IdP callback URL differs by login version
+
+When you register {{ community_name }} as a client in an **external** provider
+(Google, etc.), the redirect/callback URL you whitelist there depends on which
+login version is active:
+
+- **Login v2** (what we force above):
+  `https://id.{{ domain }}/idps/callback`
+- **Login v1** (legacy, for reference):
+  `https://id.{{ domain }}/ui/login/login/externalidp/callback`
+
+Register the **v2** URL in the external provider. Registering the wrong one is
+the most common cause of `redirect_uri_mismatch` on the provider side.
+
+## Determine the exact redirect_uri programmatically
+
+Do not guess — ask ZITADEL what redirect_uri it will use for a given IdP by
+starting an IdP intent:
+
+```bash
+zreq -X POST /v2/idp_intents -d '{
+  "idpId": "<idp-id>",
+  "urls": {
+    "successUrl": "https://{{ domain }}/",
+    "failureUrl": "https://{{ domain }}/login-error"
+  }
+}'
+# the response's authUrl / the provider exchange reveals the exact redirect_uri
+```
+
+Use that exact value when registering the client in the external provider.
+
+## Related
+
+- Wiring an external IdP (Google) for members-only, with the auto-linking
+  pitfalls: `patterns/zitadel-external-idp/`
+- Running identity work against the API: `runbooks/zitadel-identity-via-api.md`

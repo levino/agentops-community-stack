@@ -1,0 +1,75 @@
+# Pattern: role-based access through oauth2-proxy (flatten roles → `groups`)
+
+oauth2-proxy can gate access on a group claim (`--allowed-group=<role>`), but
+ZITADEL does **not** deliver roles in a shape oauth2-proxy understands.
+
+## The problem
+
+ZITADEL puts project roles in a **nested** claim — a map keyed by role, whose
+values are themselves maps:
+
+```json
+"urn:zitadel:iam:org:project:roles": {
+  "board":  { "<org-id>": "<org-domain>" },
+  "member": { "<org-id>": "<org-domain>" }
+}
+```
+
+oauth2-proxy's `--oidc-groups-claim` expects a **flat array of strings**. It
+cannot match against the nested map, so `--allowed-group=board` never matches
+and every member is rejected (or, if you drop the restriction, nobody is
+gated).
+
+## The fix: a ZITADEL Action that emits a flat `groups` array
+
+Add a ZITADEL **Action** on the **Complement Token** flow (triggers *Pre
+Userinfo creation* **and** *Pre access token creation*) that reads the user's
+grants and writes a flat `groups` claim. This is identity content — create it
+via the API/console (`runbooks/zitadel-identity-via-api.md`), not git.
+
+Action script (`groups` action):
+
+{% raw %}
+```javascript
+/**
+ * Flatten the user's project roles into a flat `groups` array so generic
+ * middleware (oauth2-proxy) can match them. Set on the Complement Token flow,
+ * triggers: Pre Userinfo creation + Pre access token creation.
+ */
+function groups(ctx, api) {
+  let roles = [];
+  if (ctx.v1.user.grants && ctx.v1.user.grants.grants) {
+    ctx.v1.user.grants.grants.forEach((grant) => {
+      (grant.roles || []).forEach((role) => {
+        if (roles.indexOf(role) === -1) {
+          roles.push(role);
+        }
+      });
+    });
+  }
+  api.v1.claims.setClaim('groups', roles);
+}
+```
+{% endraw %}
+
+Wire it up (console: Actions → create the script above → Flows → Complement
+Token → add it to *Pre Userinfo creation* and *Pre access token creation*).
+After this, tokens carry e.g. `"groups": ["board", "member"]`.
+
+## Configure oauth2-proxy to match
+
+In the oauth2-proxy args (see `patterns/app-forwardauth/oauth2-proxy.yaml`):
+
+```
+--oidc-groups-claim=groups
+--allowed-group=board          # repeat for each allowed role
+```
+
+Now ForwardAuth only lets through users whose flattened `groups` contains an
+allowed role.
+
+## Related
+
+- ForwardAuth front door: `patterns/app-forwardauth/`
+- Self-built apps can read the nested claim directly and don't need this:
+  `patterns/app-native-oidc/`

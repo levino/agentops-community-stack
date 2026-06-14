@@ -70,13 +70,14 @@ spec:
   ref:
     branch: main
   # For a PRIVATE app repo, authenticate via the GitHub App — never a PAT
-  # (AGENTS.md inv. 3). Install "Server <org>" on the repo's org (contents:
-  # read), seal an App-credential secret (githubAppID / githubAppInstallationID
-  # / githubAppPrivateKey) into apps/sealed-${NAME}-flux-secret.yaml, then
-  # uncomment:
+  # (AGENTS.md inv. 4). Install "Server <org>" on the repo's org (contents:
+  # read) and create that ORG's Flux secret DIRECTLY in the cluster — App
+  # credentials are infrastructure: NEVER committed, not even sealed (inv. 3).
+  # One secret per org (same key, that org's installation ID); see
+  # runbooks/flux-github-app.md. Then uncomment, pointing at the org secret:
   # provider: github
   # secretRef:
-  #   name: ${NAME}-flux-secret
+  #   name: ${REPO_SLUG%%/*}-flux-secret
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization

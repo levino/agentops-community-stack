@@ -1,0 +1,65 @@
+# Pattern: oauth2-proxy in front of an nginx static site
+
+Serving a static site (e.g. an Astro/Hugo build in nginx) behind oauth2-proxy
+and Traefik has two sharp edges that produce broken redirects and ugly error
+pages. Both are fixed with small config changes.
+
+## nginx leaks the internal port/scheme on redirects
+
+When nginx issues a directory/trailing-slash redirect (request `/docs` →
+`Location: /docs/`), by default it builds an **absolute** URL from the request
+it sees internally — `http://<pod>:8080/docs/`. Behind oauth2-proxy/Traefik
+that leaks the internal port and `http`, and the browser follows it to a dead
+address.
+
+Fix: make nginx emit **relative** redirects and never append a port:
+
+```nginx
+server {
+    listen 8080;
+    # Emit relative Location headers; never glue scheme/host/port on.
+    absolute_redirect off;
+    port_in_redirect  off;
+
+    root /usr/share/nginx/html;
+    # ...
+}
+```
+
+With `absolute_redirect off;` the redirect becomes `Location: /docs/` and the
+browser resolves it against the public `https://...` origin correctly.
+
+## Auto-redirect to the IdP (skip the oauth2-proxy button)
+
+By default oauth2-proxy shows its own "Sign in with ..." button page. For a
+single central IdP that interstitial is pointless — send users straight to the
+login flow:
+
+```
+--skip-provider-button=true
+```
+
+## Branding the error/sign-in page (optional)
+
+The default oauth2-proxy 403 / sign-in page is unstyled and will show up on
+**stale callbacks and expired sessions** (e.g. a user returns to a bookmarked
+protected URL after their cookie expired). To replace it with something
+branded:
+
+```
+--custom-templates-dir=/etc/oauth2-proxy/templates
+```
+
+Mount your `sign_in.html` / `error.html` there (a ConfigMap volume). Keep it
+minimal — it is only seen on the edges (expiry, denied access).
+
+## Putting it together
+
+This pattern composes with `patterns/app-forwardauth/` (the cluster-wide
+oauth2-proxy front door): protect the nginx app's ingress with the ForwardAuth
+middlewares, add the `--skip-provider-button` (and any `--custom-templates-dir`)
+flags to the shared oauth2-proxy deployment, and set `absolute_redirect off;` /
+`port_in_redirect off;` in the app's own nginx config.
+
+For a site that wants a public, link-preview-friendly front page while keeping
+content protected, see `patterns/public-landing-protected/`.

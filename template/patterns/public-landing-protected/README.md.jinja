@@ -1,0 +1,62 @@
+# Pattern: public landing page + protected content
+
+A members-only site usually wants two things that pull in opposite directions:
+
+1. the actual content must be **protected** (only logged-in members see it);
+2. links to the site shared in chats/social must still produce a **nice link
+   preview** (title, description, image).
+
+If oauth2-proxy protects `/`, then any link to the site previews as the login
+page (or nothing) — every share looks broken. The fix: a small **public
+teaser** at `/` with proper Open Graph metadata, and the real content on
+**protected** paths.
+
+## Shape
+
+```
+/                 → public teaser page: <title>, OG meta, an OG image, a
+                    "Members, sign in" link. NO real content.
+/_astro/...       → public static assets the teaser needs (CSS/JS/fonts)
+/favicon.ico      → public
+/og-image.png     → public (referenced by the OG meta)
+/<everything-else>→ PROTECTED: the real members-only content
+```
+
+The teaser page carries the link-preview metadata:
+
+```html
+<meta property="og:title"       content="{{ community_name }}" />
+<meta property="og:description" content="Members area of {{ community_name }}" />
+<meta property="og:image"       content="https://{{ domain }}/og-image.png" />
+<meta property="og:url"         content="https://{{ domain }}/" />
+```
+
+## Let only the teaser + its assets through oauth2-proxy
+
+Use oauth2-proxy `--skip-auth-route` to bypass auth for exactly the public
+surface — the teaser, its static assets, the favicon and the OG image —
+everything else stays protected:
+
+```
+--skip-auth-route=^/$
+--skip-auth-route=^/_astro/
+--skip-auth-route=^/favicon
+--skip-auth-route=^/og-image\.png$
+```
+
+(`--skip-auth-route` takes a regex and may be repeated. Keep the public set as
+tight as possible — anything not matched requires login.)
+
+## Result
+
+- A crawler/unfurler fetching `https://{{ domain }}/` gets the teaser with full
+  OG tags → clean link previews everywhere.
+- A member following any deeper link hits a protected path → oauth2-proxy sends
+  them through the central IdP, then serves the real content.
+- No protected data is ever reachable without auth.
+
+## Related
+
+- The front door itself: `patterns/app-forwardauth/`
+- nginx redirect/port-leak fixes and `--skip-provider-button`:
+  `patterns/oauth2-proxy-nginx/`
