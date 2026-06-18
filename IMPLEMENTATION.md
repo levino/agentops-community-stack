@@ -1,6 +1,13 @@
 # Implementation plan
 
-This is the build order for turning the concept in [README.md](README.md) into
+> **v1 is shipped.** Milestones 0–4 and the prose of milestone 5 are done, and
+> the e2e harness is green on every PR (both `amd64` and `arm64`). The template
+> is production-ready; what remains below (real-world acceptance ritual,
+> policy-as-guardrail, `copier update` round-trip) is additive hardening on the
+> roadmap, not a prerequisite for using it. This document now reads as the
+> record of how v1 was built.
+
+This was the build order for turning the concept in [README.md](README.md) into
 a working template. Guiding principle: **the CI harness comes first**, and the
 substrate is ported *into a green pipeline* piece by piece — not validated at
 the end.

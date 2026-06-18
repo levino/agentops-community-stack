@@ -1,7 +1,11 @@
 # agentops-community-stack
 
-> **Status: concept / draft.** This repo describes an intention, not (yet) a
-> finished implementation. It captures the plan before code exists.
+> **Status: v1 — production-ready.** The template is complete and works: every
+> pull request generates a fresh derivative and boots the *whole* substrate
+> (k3s + Traefik, cert-manager, sealed-secrets, Flux, ZITADEL, real ACME via
+> Pebble, `tofu apply`) end to end, green, on both `amd64` and `arm64`. Generate
+> your community's stack today — see [§6](#6-distribution--usage). Development
+> continues (see [§12](#12-roadmap)), but v1 is stable and meant to be used.
 
 An **agent-operable GitOps stack with central single sign-on**, designed as a
 reusable template for communities, clubs, and small organizations that want to
@@ -216,8 +220,9 @@ instead of a doc that merely warns about them.
 ## 8. Continuous validation in CI (the primary test harness)
 
 The template is not "done" when the files exist — it is done when a generated
-derivative comes up green, automatically, on every PR. The whole substrate is
-containerizable, so the main validation loop runs in GitHub Actions:
+derivative comes up green, automatically, on every PR. **It does.** The whole
+substrate is containerizable, so the main validation loop runs in GitHub
+Actions on every change:
 
 1. **Generate** a throwaway derivative via `uvx copier copy` with a CI answers
    file. This alone catches broken Jinja and invalid YAML after substitution.
@@ -254,11 +259,11 @@ agent bootstraps a real throwaway VPS following only `AGENTS.md` +
 
 ---
 
-## 9. Planned repo layout
+## 9. Repo layout
 
 ```
 agentops-community-stack/
-├── README.md                  # this document (vision + concept)
+├── README.md                  # this document (vision + usage)
 ├── IMPLEMENTATION.md          # milestone plan (what to build, in which order)
 ├── copier.yml                 # template questions (domain, IP, org, clubs, …)
 ├── .github/workflows/e2e.yml  # CI harness: generate → k3d → Flux → Pebble → smoke tests
@@ -313,7 +318,9 @@ These apply to every instance and every agent that touches the stack:
 
 ---
 
-## 12. Open decisions (settled during implementation)
+## 12. Roadmap
+
+v1 settled every decision needed to ship a usable template:
 
 - [x] Blessed deploy path: **the app owns its `deploy/` overlay**; the infra
       repo only registers it (`scripts/new-app.sh <name> --repo <url>`). An
@@ -323,8 +330,16 @@ These apply to every instance and every agent that touches the stack:
       an option once stable.
 - [x] Secret bootstrap is scripted: `scripts/fetch-sealing-cert.sh` +
       `scripts/seal-zitadel-secrets.sh` — and CI runs both on every PR (§8).
-- [ ] Guardrail scope: which lessons become Kyverno/OPA policies?
-      (Milestone 6, deliberately open.)
+
+What's next is **additive hardening, not a blocker for using v1**:
+
+- [ ] Guardrails as policy, not prose: Kyverno/OPA rules that *forbid*
+      `cluster-admin` bindings for CI identities, and more as lessons accumulate.
+- [ ] `copier update` round-trip test in CI: generate against an old template
+      ref, update to HEAD, assert a clean merge for untouched derivatives.
+
+Both ride the feedback loop in §7: real-world lessons become canon by PR, and
+derivatives pull them in with `copier update`.
 
 ---
 
