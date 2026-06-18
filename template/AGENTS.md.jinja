@@ -26,7 +26,10 @@ Read this file first. For any non-trivial operation there is a runbook:
    this repo. If you find drift, fix the repo, not the cluster.
 2. **Never `cluster-admin` for CI/OIDC identities.** CI identities get the
    `preview-deployer` ClusterRole via namespace-scoped RoleBinding only
-   (`scripts/new-app.sh` does this correctly).
+   (`scripts/new-app.sh` does this correctly). This is **enforced**, not just
+   asked: `cluster/policy/` ships a ValidatingAdmissionPolicy that denies
+   binding `cluster-admin` to any User/Group subject at admission time — you
+   cannot bypass it by hand.
 3. **Two classes of secret, two homes — never mix them.**
    - **Service/app secrets** (third-party API keys, database passwords, an
      app's own OIDC client secret, the oauth2-proxy cookie secret) belong to
@@ -82,7 +85,7 @@ Read this file first. For any non-trivial operation there is a runbook:
 | Path | What | Propagation |
 |---|---|---|
 | `flux/` | GitOps entry point (GitRepository + Kustomizations) | applied once at bootstrap, then self-managed |
-| `cluster/` | substrate: traefik, cert-manager, sealed-secrets, rbac | Flux |
+| `cluster/` | substrate: traefik, cert-manager, sealed-secrets, rbac, policy (cluster-admin guardrail) | Flux |
 | `zitadel/` | ZITADEL + Postgres + sealed bootstrap secrets | Flux (separate Kustomization — fails until secrets are sealed) |
 | `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Flux |
 | `tofu/zitadel/` | ZITADEL **bootstrap only** (instance/org); identity content is API-managed (inv. 6) | `tofu apply` (local), once |

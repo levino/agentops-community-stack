@@ -67,6 +67,43 @@ jobs:
           tofu init -backend=false
           tofu validate
 
+  # `copier update` must merge template changes cleanly into an untouched
+  # derivative — the whole point of distributing via Copier (README §6).
+  update-roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need the previous template revision to update *from*
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Generate from the previous template revision
+        run: |
+          OLD=$(git rev-parse HEAD~1)
+          echo "updating from template ref $OLD → HEAD"
+          uvx --from 'copier>=9.4' copier copy --defaults \
+            --data-file tests/answers-ci.yml --vcs-ref "$OLD" \
+            "$GITHUB_WORKSPACE" /tmp/old-derivative
+          cd /tmp/old-derivative
+          git init -q
+          git add -A
+          git -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false \
+            commit -qm "old derivative"
+
+      - name: copier update to HEAD must apply without conflicts
+        run: |
+          cd /tmp/old-derivative
+          uvx --from 'copier>=9.4' copier update --defaults --conflict inline --vcs-ref HEAD
+          if grep -RIn '^<<<<<<< ' . ; then
+            echo "FAIL: copier update left conflict markers"; exit 1
+          fi
+          if find . -name '*.rej' | grep -q . ; then
+            echo "FAIL: copier update produced .rej files"; exit 1
+          fi
+          echo "clean merge — resulting changes:"
+          git status --short
+
   e2e:
     needs: generate
     strategy:
@@ -161,6 +198,23 @@ jobs:
           kubectl -n kube-system rollout status ds/traefik --timeout=300s
           kubectl -n kube-system rollout status deploy/sealed-secrets-controller --timeout=300s
           kubectl get clusterissuer acme
+
+      - name: Smoke — cluster-admin guardrail (invariant #2 enforced)
+        run: |
+          # Binding cluster-admin to a User (a CI/OIDC identity) MUST be denied.
+          if kubectl create clusterrolebinding ci-admin-probe \
+               --clusterrole=cluster-admin --user='ci-bot@github' 2>/tmp/vap.err; then
+            echo "FAIL: policy did not deny cluster-admin binding"
+            kubectl delete clusterrolebinding ci-admin-probe
+            exit 1
+          fi
+          cat /tmp/vap.err
+          grep -qi 'cluster-admin must not be bound' /tmp/vap.err
+          # A least-privilege, namespace-scoped binding for the same identity
+          # MUST still be allowed — the guardrail must not over-block.
+          kubectl create rolebinding probe-ok -n default \
+            --clusterrole=preview-deployer --user='ci-bot@github'
+          kubectl delete rolebinding probe-ok -n default
 
       - name: Seal ZITADEL secrets (exercises the bootstrap procedure)
         run: |

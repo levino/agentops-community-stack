@@ -4,8 +4,8 @@
 > pull request generates a fresh derivative and boots the *whole* substrate
 > (k3s + Traefik, cert-manager, sealed-secrets, Flux, ZITADEL, real ACME via
 > Pebble, `tofu apply`) end to end, green, on both `amd64` and `arm64`. Generate
-> your community's stack today — see [§6](#6-distribution--usage). Development
-> continues (see [§12](#12-roadmap)), but v1 is stable and meant to be used.
+> your community's stack today — see [§6](#6-distribution--usage). v1 is stable
+> and meant to be used; it keeps evolving through the feedback loop in §7.
 
 An **agent-operable GitOps stack with central single sign-on**, designed as a
 reusable template for communities, clubs, and small organizations that want to
@@ -237,7 +237,8 @@ Actions on every change:
    in real derivatives, `pebble` in CI.
 5. **Smoke tests:** ZITADEL's OIDC discovery endpoint answers over HTTPS, the
    ForwardAuth pattern redirects an unauthenticated request, an app namespace
-   deploys via the per-app pattern, etc.
+   deploys via the per-app pattern, the `cluster-admin` guardrail actually
+   denies a forbidden binding, etc.
 
 Useful side effects:
 
@@ -250,12 +251,19 @@ Useful side effects:
 - **Incidents become executable:** every reproducible footgun from the
   originating instance becomes an assertion in the suite —
   incidents-as-regression-suite, literally.
+- **`copier update` stays clean:** a dedicated job generates a derivative from
+  the previous template revision, runs `copier update` to HEAD, and fails on
+  any conflict marker — so template improvements keep merging into existing
+  derivatives without hand-patching (§6).
+- **Guardrails are enforced, not just documented:** the `cluster-admin` policy
+  (invariant #1) is exercised — CI asserts a forbidden binding is rejected at
+  admission time.
 
 **What CI honestly cannot cover:** the `curl | sh` k3s install itself, systemd
 configuration, hostPort binding on a real NIC, real DNS + Let's Encrypt rate
-limits. That residue is small. It is covered by a rare, pre-release ritual: an
-agent bootstraps a real throwaway VPS following only `AGENTS.md` +
-`runbooks/bootstrap-from-zero.md`.
+limits. That residue is small, and it is exactly what
+`runbooks/bootstrap-from-zero.md` walks through — every step paired with a
+verify command — when you bring up a real node.
 
 ---
 
@@ -264,14 +272,13 @@ agent bootstraps a real throwaway VPS following only `AGENTS.md` +
 ```
 agentops-community-stack/
 ├── README.md                  # this document (vision + usage)
-├── IMPLEMENTATION.md          # milestone plan (what to build, in which order)
 ├── copier.yml                 # template questions (domain, IP, org, clubs, …)
 ├── .github/workflows/e2e.yml  # CI harness: generate → k3d → Flux → Pebble → smoke tests
 ├── tests/
 │   └── answers-ci.yml         # Copier answers for the CI-generated derivative
 └── template/                  # ← Copier _subdirectory: everything below is generated
     ├── AGENTS.md.jinja        # agent contract: invariants + runbooks (see below)
-    ├── cluster/               # substrate: traefik, cert-manager, sealed-secrets, flux, zitadel
+    ├── cluster/               # substrate: traefik, cert-manager, sealed-secrets, rbac, policy
     ├── tofu/zitadel/          # identity as code
     │   └── modules/community/ # reusable "org = community, project = club" module
     ├── patterns/              # copyable recipes
@@ -300,7 +307,8 @@ suite: every documented footgun is a mistake the next agent must not repeat.
 These apply to every instance and every agent that touches the stack:
 
 - **Never `cluster-admin` for CI/OIDC identities.** Namespace-scoped RBAC from
-  day one.
+  day one — *enforced* by an admission policy in `cluster/policy/`, not left to
+  discipline.
 - **GitOps is the single source of truth.** No manual `kubectl apply` outside
   documented bootstrap steps.
 - **Secrets only as sealed-secrets in git.** Never commit plaintext secrets.
@@ -318,28 +326,22 @@ These apply to every instance and every agent that touches the stack:
 
 ---
 
-## 12. Roadmap
+## 12. Design decisions (why it is the way it is)
 
-v1 settled every decision needed to ship a usable template:
+- **Blessed deploy path: the app owns its `deploy/` overlay**; the infra repo
+  only registers it (`scripts/new-app.sh <name> --repo <url>`). An in-repo mode
+  exists for third-party apps that have no repo of their own.
+- **ZITADEL OpenTofu runs locally** for real derivatives (the template's CI
+  exercises `tofu apply` end to end anyway).
+- **Secret bootstrap is scripted:** `scripts/fetch-sealing-cert.sh` +
+  `scripts/seal-zitadel-secrets.sh` — and CI runs both on every PR (§8).
+- **Guardrails are policy, not prose:** the `cluster-admin` invariant is a
+  ValidatingAdmissionPolicy (`cluster/policy/`), and `copier update` cleanliness
+  is a CI job — both verified on every PR (§8). New lessons follow the same
+  path: harden into an enforced check, not a doc that merely warns (§7).
 
-- [x] Blessed deploy path: **the app owns its `deploy/` overlay**; the infra
-      repo only registers it (`scripts/new-app.sh <name> --repo <url>`). An
-      in-repo mode exists for third-party apps that have no repo of their own.
-- [x] ZITADEL OpenTofu runs **locally** for real derivatives (the template's
-      CI exercises `tofu apply` end to end anyway). Moving to CI OIDC stays
-      an option once stable.
-- [x] Secret bootstrap is scripted: `scripts/fetch-sealing-cert.sh` +
-      `scripts/seal-zitadel-secrets.sh` — and CI runs both on every PR (§8).
-
-What's next is **additive hardening, not a blocker for using v1**:
-
-- [ ] Guardrails as policy, not prose: Kyverno/OPA rules that *forbid*
-      `cluster-admin` bindings for CI identities, and more as lessons accumulate.
-- [ ] `copier update` round-trip test in CI: generate against an old template
-      ref, update to HEAD, assert a clean merge for untouched derivatives.
-
-Both ride the feedback loop in §7: real-world lessons become canon by PR, and
-derivatives pull them in with `copier update`.
+The stack keeps evolving through the feedback loop in §7 — real-world lessons
+become canon by PR, and derivatives pull them in with `copier update`.
 
 ---
 

@@ -1,0 +1,43 @@
+# Enforced guardrail for invariant #2: never `cluster-admin` for CI/OIDC
+# identities. This turns the prose rule into an admission-time *deny* — a
+# lesson hardened into policy, not a doc that merely warns (README §7).
+#
+# Implemented with a native Kubernetes ValidatingAdmissionPolicy (CEL, GA
+# since k8s 1.30): no extra controller, no webhook pods — true to the
+# single-node / cheap-infra ethos (invariant #8). It rejects any attempt to
+# bind the `cluster-admin` ClusterRole to a User or Group subject — i.e. to
+# anything that authenticates from outside the cluster, including GitHub
+# Actions OIDC and human operators. In-cluster ServiceAccounts (Flux's own
+# controllers, etc.) are deliberately untouched: they legitimately need it
+# and predate this policy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: deny-cluster-admin-external
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterrolebindings", "rolebindings"]
+  validations:
+    - expression: >-
+        !(object.roleRef.kind == 'ClusterRole'
+          && object.roleRef.name == 'cluster-admin'
+          && has(object.subjects)
+          && object.subjects.exists(s, s.kind == 'User' || s.kind == 'Group'))
+      message: >-
+        cluster-admin must not be bound to a User or Group subject
+        (CI/OIDC or human identities). Use a namespace-scoped RoleBinding to
+        a least-privilege ClusterRole such as preview-deployer instead
+        (invariant #2).
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: deny-cluster-admin-external
+spec:
+  policyName: deny-cluster-admin-external
+  validationActions: [Deny]
