@@ -152,6 +152,14 @@ jobs:
         run: |
           NODE_IP=$(kubectl get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
           echo "node ip: $NODE_IP"
+          # k3s applies the CoreDNS addon asynchronously after the API server
+          # is up; on fast (arm64) runners this step can win the race. Wait
+          # for the deployment to exist before reconfiguring/restarting it.
+          for i in $(seq 1 60); do
+            kubectl -n kube-system get deploy coredns >/dev/null 2>&1 && break
+            echo "waiting for coredns deployment to appear ($i)"; sleep 2
+          done
+          kubectl -n kube-system rollout status deploy/coredns --timeout=120s
           # In-cluster: *.testville.example resolves to the node, where
           # Traefik listens on hostPort 80/443 (used by Pebble's HTTP-01
           # validation and by in-cluster OIDC clients).
