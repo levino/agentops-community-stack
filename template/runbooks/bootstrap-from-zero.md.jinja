@@ -60,13 +60,19 @@ kubectl create namespace argocd
 kubectl apply -n argocd \
   -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
 
-# Use annotation-based resource tracking (Argo's recommended method). The
-# ZITADEL chart provisions runtime secrets labelled app.kubernetes.io/
-# instance=zitadel; with Argo's DEFAULT label tracking those are mistaken for
-# orphaned app resources and pruned (login-client → zitadel-login never
-# starts). See runbooks/incidents/argocd-resource-tracking.md.
-kubectl -n argocd patch configmap argocd-cm --type merge \
-  -p '{"data":{"application.resourceTrackingMethod":"annotation"}}'
+# Two argocd-cm tweaks this single-node, no-LoadBalancer stack needs (see
+# runbooks/incidents/argocd-resource-tracking.md):
+#  1. annotation-based resource tracking — the ZITADEL chart provisions runtime
+#     secrets labelled app.kubernetes.io/instance=zitadel; Argo's DEFAULT label
+#     tracking mistakes them for orphans and prunes them (login-client →
+#     zitadel-login never starts).
+#  2. custom Ingress health — Traefik runs ClusterIP+hostPort with no
+#     LoadBalancer, so Ingresses never get .status.loadBalancer; Argo's default
+#     health check would otherwise hang every Ingress at Progressing forever.
+kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{
+  "application.resourceTrackingMethod":"annotation",
+  "resource.customizations.health.networking.k8s.io_Ingress":"hs = {} hs.status = \"Healthy\" hs.message = \"single-node hostPort Traefik publishes no load-balancer status\" return hs"
+}}'
 kubectl -n argocd rollout restart statefulset/argocd-application-controller
 ```
 

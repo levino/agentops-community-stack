@@ -198,14 +198,19 @@ jobs:
           kubectl create namespace argocd
           kubectl apply -n argocd \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
-          # Use annotation-based resource tracking. The ZITADEL chart (and
-          # others) provision runtime secrets labelled app.kubernetes.io/
-          # instance=zitadel; with Argo's default LABEL tracking those look like
-          # orphaned app resources and get pruned (login-client → zitadel-login
-          # stuck). Annotation tracking is Argo's recommended method and avoids
-          # this. See runbooks/incidents/argocd-resource-tracking.md.
-          kubectl -n argocd patch configmap argocd-cm --type merge \
-            -p '{"data":{"application.resourceTrackingMethod":"annotation"}}'
+          # Two argocd-cm tweaks this single-node, no-LoadBalancer stack needs
+          # (see runbooks/incidents/argocd-resource-tracking.md):
+          #  1. annotation-based resource tracking — the ZITADEL chart provisions
+          #     runtime secrets labelled app.kubernetes.io/instance=zitadel; with
+          #     Argo's default LABEL tracking those look like orphaned app
+          #     resources and get pruned (login-client → zitadel-login stuck).
+          #  2. custom Ingress health — Traefik runs as ClusterIP+hostPort with
+          #     no LoadBalancer, so Ingresses never get .status.loadBalancer and
+          #     Argo's default health check would hang them at Progressing.
+          kubectl -n argocd patch configmap argocd-cm --type merge -p '{"data":{
+            "application.resourceTrackingMethod":"annotation",
+            "resource.customizations.health.networking.k8s.io_Ingress":"hs = {} hs.status = \"Healthy\" hs.message = \"single-node hostPort Traefik publishes no load-balancer status\" return hs"
+          }}'
           kubectl -n argocd rollout restart statefulset/argocd-application-controller
           kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
           kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
