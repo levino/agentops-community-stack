@@ -59,6 +59,15 @@ bootstrap, running directly on the server is fine.
 kubectl create namespace argocd
 kubectl apply -n argocd \
   -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
+
+# Use annotation-based resource tracking (Argo's recommended method). The
+# ZITADEL chart provisions runtime secrets labelled app.kubernetes.io/
+# instance=zitadel; with Argo's DEFAULT label tracking those are mistaken for
+# orphaned app resources and pruned (login-client → zitadel-login never
+# starts). See runbooks/incidents/argocd-resource-tracking.md.
+kubectl -n argocd patch configmap argocd-cm --type merge \
+  -p '{"data":{"application.resourceTrackingMethod":"annotation"}}'
+kubectl -n argocd rollout restart statefulset/argocd-application-controller
 ```
 
 **Verify:**
