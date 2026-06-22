@@ -1,0 +1,31 @@
+# GitOps entry point ("app of apps"): this repo is the single source of truth.
+# Applied once manually during bootstrap (see runbooks/bootstrap-from-zero.md);
+# from then on Argo CD reconciles itself and every child Application from git.
+#
+# This root Application watches argocd/applications/ and stamps out one child
+# Application per file found there (traefik, cluster, zitadel-*, apps).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # Keep the root around even if its parent is ever deleted by hand.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: https://github.com/{{ github_owner }}/{{ project_name }}
+    targetRevision: main
+    path: argocd/applications
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

@@ -1,8 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# Traefik is a Helm chart deployed as an Argo CD Application
+# (argocd/applications/traefik.yaml), not from here.
 resources:
   - cert-manager/
   - sealed-secrets/
-  - traefik/
   - rbac/
   - policy/

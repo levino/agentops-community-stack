@@ -13,8 +13,8 @@ Total time: ~30–45 minutes, most of it waiting for ZITADEL's first start.
   root access, ports 80/443 free (no other web server running).
 - DNS: `*.{{ domain }}` (wildcard A record) → `{{ server_ipv4 }}`.
 - This repo pushed to `https://github.com/{{ github_owner }}/{{ project_name }}`.
-- Locally (or on the agent's machine): `kubectl`, `flux`, `kubeseal`,
-  `tofu`, `git`.
+- Locally (or on the agent's machine): `kubectl`, `kubeseal`, `tofu`, `git`
+  (the `argocd` CLI is handy but optional — everything works via `kubectl`).
 
 **Verify DNS before anything else:**
 
@@ -53,51 +53,62 @@ To operate remotely, add a `tls-san` for your API domain in
 `/etc/rancher/k3s/config.yaml` and open 6443 (see §7); for a first
 bootstrap, running directly on the server is fine.
 
-## 2. Install the Flux controllers
+## 2. Install Argo CD
 
 ```bash
-flux install
+kubectl create namespace argocd
+kubectl apply -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
 ```
 
 **Verify:**
 
 ```bash
-kubectl -n flux-system get pods   # source/kustomize/helm/notification controllers Running
+kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+kubectl -n argocd get pods   # server, repo-server, application/applicationset controllers Running
 ```
 
-## 3. Connect Flux to this repo
+## 3. Bootstrap Argo CD from this repo
 
-If the repo is private, first create the Flux **GitHub App** secret for the
-org that owns it — NEVER a PAT (invariant 4), created directly in the cluster,
-never committed (invariant 3). Full recipe in `runbooks/flux-github-app.md`;
-in short, for `{{ github_owner }}`:
+If the repo is private, first register the **GitHub App** repo credential for
+the org that owns it — NEVER a PAT (invariant 4), created directly in the
+cluster, never committed (invariant 3). Full recipe in
+`runbooks/argocd-github-app.md`; in short, for `{{ github_owner }}`:
 
 ```bash
-kubectl create namespace flux-system 2>/dev/null || true
 INST=$(gh api /orgs/{{ github_owner }}/installations \
   --jq ".installations[]|select(.app_id==<app-id>).id")
-kubectl create secret generic {{ github_owner }}-flux-secret -n flux-system \
+kubectl create secret generic {{ github_owner }}-argocd-secret -n argocd \
+  --from-literal=type=git \
+  --from-literal=url=https://github.com/{{ github_owner }} \
   --from-literal=githubAppID=<app-id> \
   --from-literal=githubAppInstallationID="$INST" \
   --from-file=githubAppPrivateKey=<app-key.pem>
+kubectl label secret {{ github_owner }}-argocd-secret -n argocd \
+  argocd.argoproj.io/secret-type=repo-creds
 ```
 
-and uncomment the `secretRef` (and keep `provider: github`) in
-`flux/gotk-sync.yaml`. Then — the only manual `kubectl apply` in the lifetime
-of this cluster:
+(A PUBLIC repo needs none of this.) Then — the only manual `kubectl apply` in
+the lifetime of this cluster — apply the root "app of apps":
 
 ```bash
-kubectl apply -k flux/
+kubectl apply -k argocd/
 ```
+
+Argo CD now reconciles the whole substrate from git (Traefik, cert-manager,
+sealed-secrets, rbac, policy, then ZITADEL and apps), ordered by sync waves.
 
 **Verify (cert-manager CRDs take a minute):**
 
 ```bash
-flux get kustomizations
-# flux-system: Ready
-# cluster:     Ready          (traefik, cert-manager, sealed-secrets)
-# zitadel:     FAILING        ← expected! sealed secrets missing, next step
-# apps:        Ready          (empty)
+kubectl -n argocd get applications
+# root:               Synced/Healthy
+# traefik:            Synced/Healthy
+# cluster:            Synced/Healthy   (cert-manager, sealed-secrets, rbac, policy)
+# zitadel-base:       OutOfSync        ← expected! sealed secrets missing, next step
+# zitadel-postgresql: Progressing → Healthy
+# zitadel:            Progressing      ← waits on the sealed secrets too
+# apps:               Synced/Healthy   (empty)
 kubectl -n kube-system get ds traefik    # DESIRED 1, READY 1
 curl -sI http://{{ domain }}             # answers (404 is fine — Traefik is up)
 ```
@@ -109,18 +120,20 @@ curl -sI http://{{ domain }}             # answers (404 is fine — Traefik is u
 ./scripts/seal-zitadel-secrets.sh
 git add sealed-secrets-public-key.pem zitadel/sealed-zitadel-*.yaml
 git commit -m "Seal ZITADEL bootstrap secrets" && git push
-flux reconcile kustomization zitadel --with-source
+# Argo CD picks this up on its next poll (~3 min); to apply immediately:
+kubectl -n argocd patch app zitadel-base --type merge \
+  -p '{"operation":{"sync":{}}}'   # or: argocd app sync zitadel-base
 ```
 
 **Verify (first start takes 5–15 min — init and setup jobs run first):**
 
 ```bash
-flux get helmreleases -n zitadel        # zitadel-postgresql, then zitadel → Ready
+kubectl -n argocd get app zitadel-base zitadel-postgresql zitadel  # → Synced/Healthy
 kubectl -n zitadel get pods             # zitadel + zitadel-login Running
 curl -fsS https://id.{{ domain }}/.well-known/openid-configuration | head -3
 ```
 
-If a HelmRelease hangs in install >30s: pull the init pod logs IMMEDIATELY —
+If the ZITADEL sync hangs in install >30s: pull the init pod logs IMMEDIATELY —
 `runbooks/incidents/zitadel-bootstrap.md` (lesson learned section). Do not wait.
 
 **Verify TLS is real:**
@@ -171,7 +184,14 @@ curl -s -o /dev/null -w '%{redirect_url}\n' \
 
 ## 7. (Optional) CI deploys via GitHub Actions OIDC
 
-To let app CIs deploy without stored kubeconfig secrets, configure the k3s
+With Argo CD, deployments are **pull-based**: production rollouts and PR
+previews are reconciled by Argo CD from git (`patterns/app-preview-prs/`), so an
+app's CI needs **no** cluster access at all — it only builds and pushes images.
+This section is therefore optional, for the rare app that genuinely needs to
+`kubectl apply` into its own namespace (it then gets the namespace-scoped
+`preview-deployer` role, never cluster-admin).
+
+To let such a CI authenticate without a stored kubeconfig, configure the k3s
 API server as an OIDC consumer of GitHub Actions tokens. In
 `/etc/rancher/k3s/config.yaml`:
 
@@ -196,9 +216,10 @@ enforces OIDC auth — unauthenticated requests get 401. If this rule is
 missing, CI deploys fail with `dial tcp {{ server_ipv4 }}:6443: i/o timeout`.
 
 CI identities authenticate as
-`https://token.actions.githubusercontent.com#repo:<owner>/<repo>:<ref>` —
-exactly the subjects `scripts/new-app.sh` binds to the `preview-deployer`
-role. Never bind them to cluster-admin (invariant).
+`https://token.actions.githubusercontent.com#repo:<owner>/<repo>:<ref>`. Bind
+such a subject to the `preview-deployer` ClusterRole with a namespace-scoped
+RoleBinding (the `cluster/rbac/` role exists for exactly this). Never bind them
+to cluster-admin (invariant) — the policy in `cluster/policy/` denies it anyway.
 
 **Verify:** a `kubectl --token=<github-oidc-token>` from a workflow can
 deploy into its app namespace and nothing else.
@@ -206,7 +227,7 @@ deploy into its app namespace and nothing else.
 ## 8. Done — handover to normal operation
 
 ```bash
-flux get kustomizations    # everything Ready
+kubectl -n argocd get applications    # everything Synced/Healthy
 kubectl get pods -A | grep -vE 'Running|Completed'   # empty
 ```
 

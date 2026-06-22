@@ -1,7 +1,8 @@
-# CI harness: generate a derivative with Copier, boot it on k3d, issue real
-# ACME certificates against an in-cluster Pebble, run identity-as-code with
-# OpenTofu, deploy apps through the per-app generator and smoke-test the
-# ForwardAuth pattern. See README.md §8.
+# CI harness: generate a derivative with Copier, boot it on k3d, reconcile the
+# substrate with Argo CD (Helm charts as Applications), issue real ACME
+# certificates against an in-cluster Pebble, run identity-as-code with OpenTofu,
+# deploy apps through the per-app generator and smoke-test the ForwardAuth
+# pattern. See README.md §8.
 name: e2e
 
 on:
@@ -36,10 +37,18 @@ jobs:
 
       - name: Kustomize build all entry points
         run: |
-          for dir in cluster apps patterns/app-forwardauth; do
+          for dir in argocd cluster apps patterns/app-forwardauth; do
             echo "=== $dir ==="
             kubectl kustomize "$DERIVATIVE/$dir" > /dev/null
           done
+          # The child Application/ApplicationSet manifests are read by Argo via
+          # directory recurse (not a kustomization) — they are not covered by
+          # `kubectl kustomize`, so parse them directly to catch broken Jinja /
+          # invalid YAML after substitution.
+          echo "=== argocd/applications ==="
+          uv run --with pyyaml -- python -c \
+            "import yaml,sys;[list(yaml.safe_load_all(open(f))) and print('ok',f) for f in sys.argv[1:]]" \
+            "$DERIVATIVE"/argocd/applications/*.yaml
           # zitadel/ references sealed secrets that only exist after sealing
           # against a live cluster — validate the build with placeholders.
           for name in masterkey db-credentials; do
@@ -120,10 +129,9 @@ jobs:
         with:
           tofu_wrapper: false
 
-      - name: Install k3d, flux, kubeseal
+      - name: Install k3d, kubeseal
         run: |
           curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-          curl -fsSL https://fluxcd.io/install.sh | sudo bash
           ARCH=$(dpkg --print-architecture)
           KUBESEAL_VERSION=0.27.3
           curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-${ARCH}.tar.gz" \
@@ -184,25 +192,42 @@ jobs:
           kubectl apply -f tests/pebble/pebble.yaml
           kubectl -n pebble rollout status deploy/pebble --timeout=120s
 
-      - name: Install Flux controllers
-        run: flux install
+      - name: Install Argo CD
+        run: |
+          # Pinned to match runbooks/bootstrap-from-zero.md.
+          kubectl create namespace argocd
+          kubectl apply -n argocd \
+            -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
+          kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+          kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+          kubectl -n argocd rollout status deploy/argocd-applicationset-controller --timeout=300s
+          # AppProject + Helm chart sources (OCI registries) the Applications need.
+          kubectl apply -f "$DERIVATIVE/argocd/project.yaml" -f "$DERIVATIVE/argocd/repositories.yaml"
 
       - name: Apply cluster substrate
         run: |
+          # CI applies the kustomize dirs directly (the git-sourced root
+          # Application can't reach an unpushed derivative — same fidelity
+          # boundary the Flux gotk-sync had). Helm charts go through Argo CD as
+          # Applications, exercising the real artifacts the template ships.
+          #
           # First attempts race the cert-manager CRDs/webhook — retry until
           # everything (including the ClusterIssuer) is accepted.
           for i in $(seq 1 12); do
-            if kubectl apply --server-side --force-conflicts -k "$DERIVATIVE/cluster"; then exit 0; fi
+            if kubectl apply --server-side --force-conflicts -k "$DERIVATIVE/cluster"; then break; fi
             echo "apply attempt $i failed, retrying while CRDs/webhook settle"; sleep 15
+            [ "$i" = 12 ] && exit 1
           done
-          exit 1
+          # Traefik is a Helm chart reconciled by Argo CD.
+          kubectl apply -f "$DERIVATIVE/argocd/applications/traefik.yaml"
 
       - name: Wait for substrate
         run: |
           for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
             kubectl -n cert-manager rollout status "deploy/$d" --timeout=300s
           done
-          kubectl wait --for=condition=Ready helmrelease/traefik -n kube-system --timeout=600s
+          kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy \
+            application/traefik --timeout=600s
           kubectl -n kube-system rollout status ds/traefik --timeout=300s
           kubectl -n kube-system rollout status deploy/sealed-secrets-controller --timeout=300s
           kubectl get clusterissuer acme
@@ -237,16 +262,24 @@ jobs:
 
       - name: Apply ZITADEL
         run: |
+          # Namespace + sealed bootstrap secrets (plain manifests).
           for i in 1 2 3 4 5 6; do
             if kubectl apply --server-side --force-conflicts -k "$DERIVATIVE/zitadel"; then break; fi
             echo "retrying zitadel apply ($i)"; sleep 15
           done
+          # Postgres first (zitadel's init job depends on it), then ZITADEL —
+          # both Helm charts reconciled by Argo CD.
+          kubectl apply -f "$DERIVATIVE/argocd/applications/zitadel-postgresql.yaml"
+          kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy \
+            application/zitadel-postgresql --timeout=600s
+          kubectl apply -f "$DERIVATIVE/argocd/applications/zitadel.yaml"
 
       - name: Wait for ZITADEL
         run: |
-          kubectl wait --for=condition=Ready helmrelease/zitadel-postgresql -n zitadel --timeout=600s
-          # First start is slow: init + setup jobs run before the deployment.
-          kubectl wait --for=condition=Ready helmrelease/zitadel -n zitadel --timeout=1500s
+          # First start is slow: init + setup jobs (Argo PreSync hooks) run
+          # before the deployment.
+          kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy \
+            application/zitadel --timeout=1500s
           kubectl -n zitadel rollout status deploy/zitadel --timeout=300s
           kubectl -n zitadel rollout status deploy/zitadel-login --timeout=300s
 
@@ -346,8 +379,11 @@ jobs:
           echo "=== nodes ==="; kubectl describe node | tail -40
           echo "=== pods ==="; kubectl get pods -A -o wide
           echo "=== events ==="; kubectl get events -A --sort-by=.lastTimestamp | tail -80
-          echo "=== helmreleases ==="; kubectl get helmrelease -A
-          kubectl describe helmrelease -A | grep -A 10 "Conditions:"
+          echo "=== argo applications ==="; kubectl -n argocd get applications -o wide
+          kubectl -n argocd describe applications | grep -A 12 -iE "Conditions:|Health:|Message:" | tail -120
+          echo "=== argocd controllers ==="
+          kubectl -n argocd logs statefulset/argocd-application-controller --tail=60
+          kubectl -n argocd logs deploy/argocd-repo-server --tail=40
           echo "=== certs ==="; kubectl get clusterissuer,certificates,certificaterequests,orders,challenges -A
           kubectl describe challenges -A | tail -60
           echo "=== ingresses ==="; kubectl get ingress -A

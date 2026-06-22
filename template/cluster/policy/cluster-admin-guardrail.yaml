@@ -7,7 +7,7 @@
 # single-node / cheap-infra ethos (invariant #8). It rejects any attempt to
 # bind the `cluster-admin` ClusterRole to a User or Group subject — i.e. to
 # anything that authenticates from outside the cluster, including GitHub
-# Actions OIDC and human operators. In-cluster ServiceAccounts (Flux's own
+# Actions OIDC and human operators. In-cluster ServiceAccounts (Argo CD's own
 # controllers, etc.) are deliberately untouched: they legitimately need it
 # and predate this policy.
 apiVersion: admissionregistration.k8s.io/v1

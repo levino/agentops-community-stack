@@ -1,0 +1,63 @@
+# Postgres runs as its own Application, NOT via the zitadel chart's
+# postgresql.enabled: the zitadel init/setup jobs are pre-install hooks and
+# would run before any subchart resources exist (chicken-and-egg).
+# See runbooks/incidents/zitadel-bootstrap.md §1.
+#
+# Wave 2: after the namespace + sealed db-credentials (zitadel-base, wave 1).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zitadel-postgresql
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: registry-1.docker.io/bitnamicharts
+    chart: postgresql
+    targetRevision: 16.x
+    helm:
+      values: |
+        # Bitnami moved most public images from bitnami/* to bitnamilegacy/*
+        # in 2025 (subscription model). The chart's default image reference no
+        # longer exists. See runbooks/incidents/zitadel-bootstrap.md §4.
+        image:
+          repository: bitnamilegacy/postgresql
+        architecture: standalone
+        auth:
+          database: zitadel
+          username: zitadel
+          existingSecret: zitadel-db-credentials
+          secretKeys:
+            adminPasswordKey: postgresPassword
+            userPasswordKey: password
+        primary:
+          persistence:
+            enabled: true
+            size: 10Gi
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+        readReplicas:
+          replicaCount: 0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zitadel
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 15s
+        maxDuration: 5m
+        factor: 2

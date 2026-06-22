@@ -39,4 +39,4 @@ kubectl create secret generic zitadel-db-credentials \
 
 echo "Wrote zitadel/sealed-zitadel-masterkey.yaml"
 echo "Wrote zitadel/sealed-zitadel-db-credentials.yaml"
-echo "Commit both files — Flux will reconcile the zitadel Kustomization."
+echo "Commit both files — Argo CD will reconcile the zitadel-base Application."

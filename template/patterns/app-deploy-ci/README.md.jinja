@@ -2,12 +2,12 @@
 
 How an app you build yourself ships new versions **without ever touching the
 cluster**. The app's own CI builds the image and writes the new tag into its
-`deploy/overlays/production` overlay; Flux (registered via `scripts/new-app.sh`)
-pulls that overlay and rolls the Deployment forward.
+`deploy/overlays/production` overlay; Argo CD (registered via
+`scripts/new-app.sh`) pulls that overlay and rolls the Deployment forward.
 
-This is the counterpart to the cluster-side wiring: `new-app.sh` gives Flux a
-`GitRepository` + `Kustomization` pointing at `deploy/overlays/production` in the
-app repo. This pattern is what populates the image tag there.
+This is the counterpart to the cluster-side wiring: `new-app.sh` gives Argo CD an
+`Application` pointing at `deploy/overlays/production` in the app repo. This
+pattern is what populates the image tag there.
 
 **Invariants this honors:** no stored kubeconfig, no `kubectl` in CI, no
 `id-token` for the cluster (inv. 1 + 2); native-arch builds, never QEMU (inv. 4).
@@ -107,9 +107,9 @@ jobs:
 {% endraw %}
 
 There is **no `kubectl`, no `KUBECONFIG`, no `id-token: write`** anywhere — the
-production deploy never authenticates to the cluster. (PR-preview deploys are the
-only thing that talks to the cluster, via the namespace-scoped `preview-deployer`
-binding `new-app.sh` created — see `cluster/rbac/`.)
+production deploy never authenticates to the cluster. PR previews are pull-based
+too: Argo CD's PullRequest generator deploys each open PR and prunes it on close
+(`patterns/app-preview-prs/`), so CI never talks to the cluster at all.
 
 ## Database migrations (single-replica apps)
 
@@ -129,12 +129,14 @@ initContainers:
 Migrations run once per rollout, before the app starts; a failed migration
 crashes the rollout instead of serving a half-migrated app.
 
-## Alternative: Flux image-automation
+## Alternative: Argo CD Image Updater
 
 If an app's overlay lives **in this GitOps repo** (not in the app repo), the app
-CI cannot commit the tag. Use Flux image-automation instead: an
-`ImageRepository` + `ImagePolicy` + `ImageUpdateAutomation` resolves the newest
-tag and Flux writes it into the overlay. This needs the Flux git credential to
-have **write** access to this repo, and a sortable tag (e.g. a `^\d{14}$` UTC
-timestamp) the policy can order. Prefer the app-CI-commits-the-tag pattern above
-when the app owns its overlay — it needs no extra write credential.
+CI cannot commit the tag. Run [Argo CD Image
+Updater](https://argocd-image-updater.readthedocs.io/) instead: annotate the
+`Application` with an image alias and an update strategy, and the updater watches
+the registry and bumps the tag — either by patching the live Application or by
+writing back to git (`write-back-method: git`, which needs a git credential with
+**write** access and a sortable tag the strategy can order). Prefer the
+app-CI-commits-the-tag pattern above when the app owns its overlay — it needs no
+extra component or write credential.

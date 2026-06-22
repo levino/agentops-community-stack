@@ -1,0 +1,35 @@
+# Apps: one entry per application, stamped by scripts/new-app.sh into apps/.
+# A plain kustomize directory — Argo CD renders and reconciles it.
+#
+# Wave 1: after the substrate (apps need namespaces, the issuer and Traefik).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: https://github.com/{{ github_owner }}/{{ project_name }}
+    targetRevision: main
+    path: apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        maxDuration: 3m
+        factor: 2

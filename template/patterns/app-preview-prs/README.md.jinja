@@ -1,0 +1,123 @@
+# Pattern: PR previews — one live environment per open pull request
+
+Argo CD's native answer to "deploy every PR, tear it down on merge/close" — and
+the reason this stack runs Argo CD rather than a push-based reconciler. An
+**ApplicationSet** with a **PullRequest generator** watches an app repo, stamps
+out one `Application` per open PR into its own namespace, and **prunes it
+automatically when the PR closes**. That auto-pruning is the structural fix for
+the disk-pressure outage (`runbooks/incidents/disk-pressure.md`): dead previews
+can no longer pile up, because nobody has to remember to clean them.
+
+This is **pull-based**: Argo CD reads the PR branches itself. The app's CI never
+gets cluster credentials — no `kubectl`, no `KUBECONFIG`, no `id-token` for the
+cluster (AGENTS.md inv. 1). It only builds and pushes the image.
+
+## 1. The app repo carries a preview overlay
+
+Alongside `deploy/overlays/production`, the app repo adds
+`deploy/overlays/preview`. It must be **self-contained per PR** so previews
+never collide:
+
+```
+deploy/overlays/preview/
+  kustomization.yaml      # nameSuffix / namespace come from the PR (see below)
+  deployment.yaml         # image: ghcr.io/{{ github_owner }}/<app>  (CI sets the tag)
+  service.yaml
+  ingress.yaml            # host: <app>-pr-<n>.{{ domain }} ; issuer: acme
+```
+
+Keep previews cheap: one replica, `revisionHistoryLimit: 2`,
+`progressDeadlineSeconds: 300` (same discipline `new-app.sh` bakes into in-repo
+apps — disk-pressure prevention).
+
+## 2. Register the ApplicationSet
+
+`scripts/new-app.sh <app> --repo https://github.com/{{ github_owner }}/<app>`
+writes **two** files into `apps/`:
+
+- `apps/<app>.yaml` — the production `Application` (push to `main` → rollout);
+- `apps/<app>-previews.yaml` — the preview `ApplicationSet` (below). Pass
+  `--no-previews` to skip it, or `--preview-path` to point elsewhere than
+  `deploy/overlays/preview`.
+
+{% raw %}
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: <app>-previews
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - pullRequest:
+        github:
+          owner: <owner>
+          repo: <app>
+          # tokenRef:                        # private repo / rate limits:
+          #   secretName: <owner>-argocd-secret   # the GitHub App secret
+          #   key: githubAppPrivateKey            # (runbooks/argocd-github-app.md)
+        requeueAfterSeconds: 60
+  template:
+    metadata:
+      name: '<app>-pr-{{ .number }}'
+    spec:
+      project: community
+      source:
+        repoURL: https://github.com/<owner>/<app>
+        targetRevision: '{{ .head_sha }}'   # the PR's HEAD, re-synced on every push
+        path: deploy/overlays/preview
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '<app>-pr-{{ .number }}'
+      syncPolicy:
+        automated:
+          prune: true        # converge the namespace to the PR's manifests
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+{% endraw %}
+
+When a PR closes, the generator stops emitting its entry; the ApplicationSet
+deletes the `Application`, whose `resources-finalizer` prunes everything it
+created (deployment, service, ingress, certificate). On a new commit, Argo
+re-syncs the same namespace to the new `head_sha` — old pods are replaced, not
+accumulated.
+
+## 3. Filter which PRs get a preview (optional)
+
+To preview only PRs that opt in (cheaper on a single node), label them and add
+a filter:
+
+```yaml
+  generators:
+    - pullRequest:
+        github:
+          owner: <owner>
+          repo: <app>
+          labels:
+            - preview
+        requeueAfterSeconds: 60
+```
+
+Now only PRs carrying the `preview` label get an environment.
+
+## 4. Per-PR hostname & TLS
+
+The preview ingress should use a per-PR host so each environment is reachable
+and gets its own certificate, e.g. `<app>-pr-<n>.{{ domain }}` (covered by the
+`*.{{ domain }}` wildcard DNS, issuer `acme`). Derive `<n>` in the preview
+overlay from the namespace, or template it via the ApplicationSet (an extra
+parameter on the generator). Keep the issuer named `acme` (AGENTS.md).
+
+## Why this replaced push-based previews
+
+The previous (Flux-era) design had the app's CI `kubectl apply` previews using a
+namespace-scoped `preview-deployer` RoleBinding. Pull-based previews remove that
+cluster credential from CI entirely and make cleanup automatic instead of a
+workflow step that could be forgotten — which is exactly how the disk-pressure
+incident happened. The `preview-deployer` ClusterRole still ships
+(`cluster/rbac/`) for any app that genuinely needs push access, but previews no
+longer require it.

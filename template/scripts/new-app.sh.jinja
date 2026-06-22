@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Layer-2 generator: stamp out the per-app pattern (namespace, scoped RBAC,
-# Flux registration, TLS ingress). See apps/README.md.
+# Layer-2 generator: stamp out the per-app pattern (namespace, Argo CD
+# Application, optional PR-preview ApplicationSet, TLS ingress). See apps/README.md.
 #
 # Own app (blessed path — the app repo owns deploy/overlays/production):
 #   scripts/new-app.sh <name> --repo <github-url> [--path deploy/overlays/production]
+#                             [--no-previews] [--preview-path deploy/overlays/preview]
 #
 # Third-party / in-repo app:
 #   scripts/new-app.sh <name> --domain <host> --image <image> [--port 80] [--protected]
@@ -12,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  sed -n '2,9p' "scripts/$(basename "$0")"
+  sed -n '2,10p' "scripts/$(basename "$0")"
   exit 1
 }
 
@@ -22,6 +23,7 @@ shift
 [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "error: name must be lowercase DNS-safe" >&2; exit 1; }
 
 DOMAIN="" IMAGE="" PORT=80 PROTECTED=0 REPO="" REPO_PATH="deploy/overlays/production"
+PREVIEWS=1 PREVIEW_PATH="deploy/overlays/preview"
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN=$2; shift 2 ;;
@@ -30,6 +32,8 @@ while [ $# -gt 0 ]; do
     --protected) PROTECTED=1; shift ;;
     --repo) REPO=$2; shift 2 ;;
     --path) REPO_PATH=$2; shift 2 ;;
+    --no-previews) PREVIEWS=0; shift ;;
+    --preview-path) PREVIEW_PATH=$2; shift 2 ;;
     *) echo "error: unknown argument $1" >&2; usage ;;
   esac
 done
@@ -52,6 +56,8 @@ if [ -n "$REPO" ]; then
   REPO_SLUG=${REPO#https://github.com/}
   REPO_SLUG=${REPO_SLUG%.git}
   [[ "$REPO_SLUG" == */* ]] || { echo "error: --repo must be a https://github.com/<owner>/<repo> URL" >&2; exit 1; }
+  REPO_OWNER=${REPO_SLUG%%/*}
+  REPO_NAME=${REPO_SLUG#*/}
 
   cat > "apps/${NAME}.yaml" <<EOF
 apiVersion: v1
@@ -59,57 +65,89 @@ kind: Namespace
 metadata:
   name: ${NAME}
 ---
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: GitRepository
+# Production: Argo CD pulls the app repo's overlay and rolls it forward on
+# every push to main — pull-based, so CI never needs cluster access.
+# For a PRIVATE app repo, register that org's GitHub App repo credential in
+# Argo CD ONCE (runbooks/argocd-github-app.md) — App credentials are
+# infrastructure: created in the cluster, NEVER committed, not even sealed
+# (AGENTS.md inv. 3).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
 metadata:
   name: ${NAME}
-  namespace: flux-system
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
-  interval: 1m
-  url: ${REPO}
-  ref:
-    branch: main
-  # For a PRIVATE app repo, authenticate via the GitHub App — never a PAT
-  # (AGENTS.md inv. 4). Install "Server <org>" on the repo's org (contents:
-  # read) and create that ORG's Flux secret DIRECTLY in the cluster — App
-  # credentials are infrastructure: NEVER committed, not even sealed (inv. 3).
-  # One secret per org (same key, that org's installation ID); see
-  # runbooks/flux-github-app.md. Then uncomment, pointing at the org secret:
-  # provider: github
-  # secretRef:
-  #   name: ${REPO_SLUG%%/*}-flux-secret
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: ${NAME}
-  namespace: flux-system
-spec:
-  interval: 10m
-  path: ./${REPO_PATH}
-  prune: false
-  sourceRef:
-    kind: GitRepository
-    name: ${NAME}
----
-# Namespace-scoped CI access for PR previews — never cluster-admin.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: preview-deployer
-  namespace: ${NAME}
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: User
-    name: https://token.actions.githubusercontent.com#repo:${REPO_SLUG}:pull_request
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: preview-deployer
+  project: community
+  source:
+    repoURL: ${REPO}
+    targetRevision: main
+    path: ${REPO_PATH}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${NAME}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 EOF
   register "${NAME}.yaml"
-  echo "Created apps/${NAME}.yaml (Flux pulls ${REPO} → ${REPO_PATH})"
+  echo "Created apps/${NAME}.yaml (Argo CD pulls ${REPO} → ${REPO_PATH})"
+
+  if [ "$PREVIEWS" = "1" ]; then
+    # ApplicationSet with a PullRequest generator: one preview Application per
+    # OPEN PR of the app repo, deployed into its own namespace and AUTOMATICALLY
+    # PRUNED when the PR closes — Argo's native answer to the disk-pressure
+    # incident (runbooks/incidents/disk-pressure.md). The app repo must carry a
+    # preview overlay at ${PREVIEW_PATH}. For a private repo (or to avoid
+    # GitHub API rate limits), set tokenRef to the org's Argo GitHub App
+    # secret — see runbooks/argocd-github-app.md.
+    cat > "apps/${NAME}-previews.yaml" <<EOF
+{% raw %}apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: ${NAME}-previews
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - pullRequest:
+        github:
+          owner: ${REPO_OWNER}
+          repo: ${REPO_NAME}
+          # tokenRef:                       # uncomment for private repos / rate limits
+          #   secretName: ${REPO_OWNER}-argocd-secret
+          #   key: githubAppPrivateKey
+        requeueAfterSeconds: 60
+  template:
+    metadata:
+      name: '${NAME}-pr-{{ .number }}'
+    spec:
+      project: community
+      source:
+        repoURL: ${REPO}
+        targetRevision: '{{ .head_sha }}'
+        path: ${PREVIEW_PATH}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '${NAME}-pr-{{ .number }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+{% endraw %}EOF
+    register "${NAME}-previews.yaml"
+    echo "Created apps/${NAME}-previews.yaml (PR previews → ${REPO_PATH%/production}/preview, auto-pruned on close)"
+  fi
+
   echo "Next: commit & push. If the app needs login, see patterns/app-native-oidc/."
+  echo "PR previews: see patterns/app-preview-prs/ for the overlay the app repo must carry."
   exit 0
 fi
 
@@ -203,4 +241,4 @@ echo "Created apps/${NAME}/ (${IMAGE} at https://${DOMAIN})"
 if [ "$PROTECTED" = "1" ]; then
   echo "Protected by ForwardAuth — patterns/app-forwardauth/ must be deployed."
 fi
-echo "Next: commit & push — Flux rolls it out."
+echo "Next: commit & push — Argo CD rolls it out."

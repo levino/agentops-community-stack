@@ -13,12 +13,14 @@ The app's repository contains its manifests (e.g.
 ./scripts/new-app.sh myapp --repo https://github.com/OWNER/myapp
 ```
 
-This creates `apps/myapp.yaml` with a `GitRepository` + `Kustomization`
-(Flux pulls the app repo directly), the namespace, and a namespace-scoped
-`RoleBinding` of the `preview-deployer` ClusterRole for the app's CI
-identity. Rollout = push to the app repo's `main`.
+This creates `apps/myapp.yaml` (the namespace + an Argo CD `Application` that
+pulls the app repo's `deploy/overlays/production`) and, unless you pass
+`--no-previews`, `apps/myapp-previews.yaml` (an `ApplicationSet` PullRequest
+generator — one live environment per open PR, auto-pruned on close; see
+`patterns/app-preview-prs/`). Rollout = push to the app repo's `main`.
 
-If the app needs login, give it its own OIDC client:
+Everything is **pull-based**: Argo CD reads the repo, so the app's CI never
+needs cluster credentials. If the app needs login, give it its own OIDC client:
 see `patterns/app-native-oidc/`.
 
 ## 2. Third-party / static apps: manifests live here
@@ -36,10 +38,11 @@ deployed once).
 
 ## Rules
 
-- One namespace per app. CI identities get the `preview-deployer` role in
-  their namespace only — never `cluster-admin`.
+- One namespace per app (one per PR for previews). If an app's CI ever needs
+  push access, it gets the `preview-deployer` role in its namespace only —
+  never `cluster-admin`.
 - Images must be built for the server architecture (multi-arch builds).
 - Only **app/service secrets** enter this repo, and only as SealedSecrets.
-  **Infrastructure credentials** (Flux GitHub App key, ZITADEL operator
+  **Infrastructure credentials** (Argo CD GitHub App key, ZITADEL operator
   credential) live only in the cluster — never committed, not even sealed
-  (AGENTS.md inv. 3; `runbooks/flux-github-app.md`).
+  (AGENTS.md inv. 3; `runbooks/argocd-github-app.md`).

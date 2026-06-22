@@ -1,0 +1,23 @@
+# Single AppProject for the whole instance. Single-node, single-tenant: the
+# project may target any namespace and manage cluster-scoped resources
+# (namespaces, CRDs, the ClusterIssuer, ClusterRoles, the admission policy).
+# The cluster-admin guardrail (cluster/policy/) — not the project — is what
+# enforces invariant #2; the project is just Argo's unit of grouping here.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: community
+  namespace: argocd
+spec:
+  description: GitOps for this community's single-node substrate and apps.
+  sourceRepos:
+    - '*'
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: '*'
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'

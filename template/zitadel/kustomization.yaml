@@ -4,9 +4,11 @@ resources:
   - namespace.yaml
   - sealed-zitadel-masterkey.yaml
   - sealed-zitadel-db-credentials.yaml
-  - postgres.yaml
-  - helmrelease.yaml
+# ZITADEL and Postgres themselves are Helm charts deployed as Argo CD
+# Applications (argocd/applications/zitadel*.yaml), not from here. This
+# directory holds only the namespace and the sealed bootstrap secrets.
+#
 # The two sealed-*.yaml files are created during bootstrap by
 # scripts/seal-zitadel-secrets.sh — see SECRETS.md. Until they are
-# committed, the `zitadel` Flux Kustomization fails on purpose while the
-# rest of the substrate stays healthy.
+# committed, the `zitadel-base` Application stays OutOfSync on purpose while
+# the rest of the substrate stays healthy.

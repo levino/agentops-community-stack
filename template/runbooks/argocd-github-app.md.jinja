@@ -1,0 +1,102 @@
+# Argo CD git auth — the GitHub App, installed per org
+
+Argo CD authenticates to GitHub with a **GitHub App**, never a PAT (invariant 4).
+The reality that bites people: **one App, installed separately on every org**
+whose repos Argo CD must read (the infra repo, plus every app repo on the
+blessed path and every repo a PR-preview ApplicationSet watches). Each install
+has its own **installation ID**; Argo CD needs **one credential per org** (same
+private key, that org's installation ID). These are **infrastructure
+credentials**: created directly in the cluster, **never committed, not even
+sealed** (invariant 3).
+
+PUBLIC repos need none of this — Argo CD reads them anonymously (a token only
+raises the GitHub API rate limit for the PR-preview generator). Set this up when
+a repo is private.
+
+## The App (once per instance)
+
+Create **one** GitHub App for the whole instance, named `Server
+{{ community_name }}` (or `Server <org>`):
+
+- **Permissions:** Repository → Contents: **Read-only** (Argo CD only reads).
+  For PR previews also grant **Pull requests: Read-only** (the PullRequest
+  generator lists open PRs).
+- **Where can this App be installed:** Any account (so it can be installed on
+  every org that hosts repos Argo CD reads).
+- Note the **App ID** and generate a **private key** (`.pem`). The key is
+  shared across every installation.
+
+## Install on each org
+
+Install the App on **every** org whose repos Argo CD reads — this repo's org
+(`{{ github_owner }}`) and any org hosting an app overlay or a previewed repo.
+Each installation gets a distinct installation ID.
+
+Find an org's installation ID (App ID is the same everywhere):
+
+```bash
+gh api /orgs/<org>/installations \
+  --jq '.installations[] | select(.app_id==<app-id>) | .id'
+```
+
+For a user account rather than an org, use `/users/<user>/installation`:
+
+```bash
+gh api /users/<user>/installation --jq '.id'
+```
+
+## One Argo CD credential per org (in the cluster, never in git)
+
+Argo CD reads git credentials from Secrets in the `argocd` namespace labeled
+`argocd.argoproj.io/secret-type`. Use a **`repo-creds`** entry keyed by the
+org's URL prefix — it then covers every repo under that org:
+
+```bash
+kubectl create secret generic <org>-argocd-secret -n argocd \
+  --from-literal=type=git \
+  --from-literal=url=https://github.com/<org> \
+  --from-literal=githubAppID=<app-id> \
+  --from-literal=githubAppInstallationID=<installation-id> \
+  --from-file=githubAppPrivateKey=<app-key.pem>
+kubectl label secret <org>-argocd-secret -n argocd \
+  argocd.argoproj.io/secret-type=repo-creds
+```
+
+Do this for `{{ github_owner }}` (this repo's org) and once more for every other
+org Argo CD reads — same `<app-id>` and same `.pem`, only the installation ID
+differs. The root `Application` and all child `Application`s whose `repoURL`
+starts with `https://github.com/<org>` then authenticate automatically.
+
+## PR-preview generator token
+
+The PullRequest generator in a preview `ApplicationSet`
+(`patterns/app-preview-prs/`) authenticates with the **same** App. Point its
+`tokenRef` at the org's secret:
+
+```yaml
+generators:
+  - pullRequest:
+      github:
+        owner: <org>
+        repo: <app>
+        tokenRef:
+          secretName: <org>-argocd-secret
+          key: githubAppPrivateKey
+```
+
+## Verify
+
+```bash
+# Sources resolve (no "authentication required"):
+argocd repo list                         # or, without the CLI:
+kubectl -n argocd get application root -o jsonpath='{.status.sync.status}{"\n"}'
+kubectl -n argocd get applications       # all Synced/Healthy, none "ComparisonError"
+```
+
+## Rebuild note (accepted trade-off)
+
+Because these credentials are never in git (invariant 3), they are **not**
+reproducible from the repo. On a cluster rebuild, recreate every
+`<org>-argocd-secret` by hand with the commands above (App ID + per-org
+installation ID + the shared `.pem`). Keep the `.pem` and App ID in the
+operator's password manager, not in this repo.

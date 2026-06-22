@@ -1,0 +1,10 @@
+# Applied once at bootstrap: `kubectl apply -k argocd/` (after `argocd` is
+# installed and, for a private repo, the GitHub App secret exists). This wires
+# up the AppProject, the Helm chart sources, and the root "app of apps" —
+# from then on Argo CD reconciles everything from git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - project.yaml
+  - repositories.yaml
+  - root.yaml

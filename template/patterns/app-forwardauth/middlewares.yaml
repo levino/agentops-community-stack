@@ -2,7 +2,7 @@
 #   traefik.ingress.kubernetes.io/router.middlewares: >-
 #     forwardauth-oauth-errors@kubernetescrd,forwardauth-forwardauth@kubernetescrd
 # (Cross-namespace references require providers.kubernetesCRD.
-# allowCrossNamespace=true — set in cluster/traefik/helmrelease.yaml.)
+# allowCrossNamespace=true — set in argocd/applications/traefik.yaml.)
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:

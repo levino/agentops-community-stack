@@ -13,7 +13,7 @@ instance — they are general, not instance-specific):
 - `disk-pressure.md` — uncleaned PR previews filled the disk; the whole
   single-node cluster went down.
 - `zitadel-bootstrap.md` — six distinct traps when bringing up
-  ZITADEL/Postgres under Flux. The template already encodes the fixes; the
+  ZITADEL/Postgres via Helm. The template already encodes the fixes; the
   file explains *why* those settings exist, so nobody "simplifies" them away.
 
 The feedback loop: if an incident's lesson generalizes beyond this

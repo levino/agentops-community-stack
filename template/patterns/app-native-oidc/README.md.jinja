@@ -83,7 +83,7 @@ blessed path).
 
 The app repo owns `deploy/overlays/production` (deployment, service,
 ingress with `cert-manager.io/cluster-issuer: acme`, the sealed secret).
-Flux pulls it directly; rollout = push to `main`.
+Argo CD pulls it directly; rollout = push to `main`.
 
 ## 3. Authorize on role claims
 
