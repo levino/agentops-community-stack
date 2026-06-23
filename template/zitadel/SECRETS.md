@@ -1,6 +1,7 @@
 # ZITADEL bootstrap secrets
 
-Two secrets must exist before Flux can reconcile `helmrelease.yaml`:
+Two secrets must exist before the `zitadel` Helm Application can start
+(`argocd/applications/zitadel.yaml`):
 
 | Secret | Content |
 |---|---|
@@ -38,7 +39,8 @@ git commit -m "Seal ZITADEL bootstrap secrets"
 git push
 ```
 
-Flux picks up the commit and the `zitadel` Kustomization turns green.
+Argo CD picks up the commit (or sync `zitadel-base` manually) and the
+ZITADEL Applications turn Synced/Healthy.
 
 With the public key in the repo, later secrets can be sealed **offline**
 (`kubeseal --cert sealed-secrets-public-key.pem`) — no cluster access needed.

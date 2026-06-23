@@ -13,12 +13,13 @@ do not get "simplified" away.*
 runs hooks BEFORE regular manifests. The Postgres subchart is regular →
 does not exist yet when the hook starts.
 
-**Fix (encoded):** Postgres as its own HelmRelease (`zitadel/postgres.yaml`),
-zitadel HelmRelease `dependsOn` it.
+**Fix (encoded):** Postgres as its own Argo CD Application
+(`argocd/applications/zitadel-postgresql.yaml`); the `zitadel` Application runs
+in a later sync wave so Postgres exists first.
 
 ## 2. ghcr.io OCI 404 ≠ auth problem
 
-**Symptom:** Flux reports "403 denied" pulling
+**Symptom:** the chart pull reports "403 denied" for
 `oci://ghcr.io/zitadel/charts/zitadel`.
 
 **Root cause:** wrong path — correct is `zitadel/zitadel-charts`. Anonymous
@@ -32,8 +33,9 @@ before rolling out auth secrets.
 **Symptom:** `unsupported protocol scheme "oci"` pulling from
 `https://charts.bitnami.com/bitnami`.
 
-**Fix (encoded):** HelmRepository with `type: oci`,
-`url: oci://registry-1.docker.io/bitnamicharts`.
+**Fix (encoded):** the chart source is an OCI Helm repo
+(`registry-1.docker.io/bitnamicharts`, `enableOCI: "true"` in
+`argocd/repositories.yaml`).
 
 ## 4. Bitnami container images moved to `bitnamilegacy/`
 
@@ -43,8 +45,8 @@ before rolling out auth secrets.
 (subscription model).
 
 **Fix (encoded):** `image.repository: bitnamilegacy/postgresql` in the
-Postgres HelmRelease. Note: a pod stuck in ImagePullBackOff must be deleted
-manually once after fixing the reference.
+Postgres Application's Helm values. Note: a pod stuck in ImagePullBackOff must
+be deleted manually once after fixing the reference.
 
 ## 5. The zitadel chart does NOT render `ExistingSecret` blocks to env vars
 
@@ -58,7 +60,7 @@ knows cleartext config or `ZITADEL_*` env vars.
 
 **Fix (encoded):** DB passwords via top-level `env:` with `secretKeyRef`
 (`ZITADEL_DATABASE_POSTGRES_USER_PASSWORD` /
-`…_ADMIN_PASSWORD`) — see `zitadel/helmrelease.yaml`.
+`…_ADMIN_PASSWORD`) — see `argocd/applications/zitadel.yaml`.
 
 ## 6. Job `activeDeadlineSeconds` default too tight to debug
 

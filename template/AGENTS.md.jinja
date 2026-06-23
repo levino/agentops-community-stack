@@ -2,7 +2,7 @@
 
 This repository runs the infrastructure of **{{ community_name }}**:
 a single-node k3s cluster on {{ server_ipv4 }} ({{ target_arch }}), GitOps
-via Flux, central identity via ZITADEL at `id.{{ domain }}`. It is generated
+via Argo CD, central identity via ZITADEL at `id.{{ domain }}`. It is generated
 from [agentops-community-stack](https://github.com/levino/agentops-community-stack)
 and is designed so that **you, the agent, can build and operate it from
 zero** — the human is product owner, not operator.
@@ -11,7 +11,8 @@ Read this file first. For any non-trivial operation there is a runbook:
 
 - Build everything from scratch: `runbooks/bootstrap-from-zero.md`
 - Known footguns (read BEFORE debugging): `runbooks/incidents/`
-- Flux git auth (GitHub App, per-org secret): `runbooks/flux-github-app.md`
+- Argo CD git auth (GitHub App, per-org credential): `runbooks/argocd-github-app.md`
+- PR previews (ApplicationSet PullRequest generator): `patterns/app-preview-prs/`
 - ZITADEL bootstrap secrets: `zitadel/SECRETS.md`
 - ZITADEL identity content (API, not git): `runbooks/zitadel-identity-via-api.md`
 - Identity bootstrap (tofu, minimal): `tofu/zitadel/README.md`
@@ -36,27 +37,29 @@ Read this file first. For any non-trivial operation there is a runbook:
      an app and rotate with it. These — and ONLY these — enter the repo as
      **SealedSecrets**: seal offline against `sealed-secrets-public-key.pem`,
      commit the sealed blob next to the app.
-   - **Infrastructure credentials** (above all the Flux git-auth GitHub App
+   - **Infrastructure credentials** (above all the Argo CD git-auth GitHub App
      key — see inv. 4 — and any ZITADEL operator credential — see inv. 6)
      live **ONLY in the cluster**, created directly with `kubectl` — **NEVER
      in git, not even sealed.** A sealed infra credential leaves a permanent
      encrypted blob in history forever and is not what SealedSecrets are for.
      Accepted trade-off (documented, not a bug): these secrets are **not**
      reproducible from git and must be **recreated by hand at cluster
-     rebuild** — the bootstrap and `runbooks/flux-github-app.md` cover how.
+     rebuild** — the bootstrap and `runbooks/argocd-github-app.md` cover how.
    Never commit plaintext, never echo secrets into logs.
-4. **Flux git authentication is ALWAYS a GitHub App — NEVER a PAT.** Create
+4. **Argo CD git authentication is ALWAYS a GitHub App — NEVER a PAT.** Create
    one GitHub App per instance, named `Server {{ community_name }}` (or
-   `Server <org>`), install it **separately on every org** whose repos Flux
-   must read (`contents: read`), and reference it from each `GitRepository`
-   via `provider: github` + a secret holding `githubAppID` /
-   `githubAppInstallationID` / `githubAppPrivateKey`. The installation ID is
-   **per-org** (one Flux secret per org, same key, that org's installation
+   `Server <org>`), install it **separately on every org** whose repos Argo CD
+   must read (`contents: read`, plus `pull requests: read` for PR previews),
+   and register it as an Argo CD **`repo-creds`** secret in the `argocd`
+   namespace holding `githubAppID` / `githubAppInstallationID` /
+   `githubAppPrivateKey`, keyed by the org's URL prefix. The installation ID is
+   **per-org** (one credential per org, same key, that org's installation
    ID); the private key is shared across installs. A GitHub App is scoped,
    centrally revocable and mints short-lived tokens — a PAT is a broad,
    personal, long-lived credential and must not be used. These App secrets
    are infrastructure credentials: created directly in the cluster, never
-   committed (inv. 3). Full recipe: `runbooks/flux-github-app.md`.
+   committed (inv. 3). PUBLIC repos need no credential at all. Full recipe:
+   `runbooks/argocd-github-app.md`.
 5. **Images must run on {{ target_arch }} — built on NATIVE runners, never
    QEMU.** Build each architecture on its own native GitHub runner
    (`ubuntu-24.04-arm` for arm64, `ubuntu-latest` for amd64) and merge them
@@ -84,30 +87,33 @@ Read this file first. For any non-trivial operation there is a runbook:
 
 | Path | What | Propagation |
 |---|---|---|
-| `flux/` | GitOps entry point (GitRepository + Kustomizations) | applied once at bootstrap, then self-managed |
-| `cluster/` | substrate: traefik, cert-manager, sealed-secrets, rbac, policy (cluster-admin guardrail) | Flux |
-| `zitadel/` | ZITADEL + Postgres + sealed bootstrap secrets | Flux (separate Kustomization — fails until secrets are sealed) |
-| `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Flux |
+| `argocd/` | GitOps entry point (AppProject + Helm repo sources + root "app of apps") | applied once at bootstrap, then self-managed |
+| `argocd/applications/` | child Applications: traefik, cluster, zitadel(-base/-postgresql), apps | Argo CD |
+| `cluster/` | substrate: cert-manager, sealed-secrets, rbac, policy (cluster-admin guardrail) | Argo CD (Application `cluster`) |
+| `zitadel/` | ZITADEL namespace + sealed bootstrap secrets (ZITADEL/Postgres are Helm Applications) | Argo CD (Application `zitadel-base` — OutOfSync until secrets are sealed) |
+| `apps/` | one entry per app — stamped by `scripts/new-app.sh` | Argo CD (Application `apps`) |
 | `tofu/zitadel/` | ZITADEL **bootstrap only** (instance/org); identity content is API-managed (inv. 6) | `tofu apply` (local), once |
-| `patterns/` | copyable recipes: native OIDC, ForwardAuth, login v2, external IdP, role→groups, oauth2-proxy+nginx, public/protected sites, app deploy CI | read, copy, adapt |
-| `runbooks/` | bootstrap, Flux GitHub App, ZITADEL-via-API, incidents | read |
+| `patterns/` | copyable recipes: native OIDC, ForwardAuth, PR previews, login v2, external IdP, role→groups, oauth2-proxy+nginx, public/protected sites, app deploy CI | read, copy, adapt |
+| `runbooks/` | bootstrap, Argo CD GitHub App, ZITADEL-via-API, incidents | read |
 
 ## Verify commands (use these before declaring anything healthy)
 
 ```bash
-flux get kustomizations          # all Ready=True
-flux get helmreleases -A         # traefik, zitadel-postgresql, zitadel Ready
+kubectl -n argocd get applications   # all SYNC=Synced, HEALTH=Healthy
+                                     # (zitadel-base stays OutOfSync until sealed)
 kubectl get pods -A | grep -v Running | grep -v Completed   # should be empty
 kubectl get certificates -A      # all Ready=True
 curl -fsS https://id.{{ domain }}/.well-known/openid-configuration | head -3
 kubectl describe node | grep -A5 Conditions   # no DiskPressure (see incidents/)
 ```
 
+(With the Argo CD CLI logged in, `argocd app list` shows the same.)
+
 ## Operating rules of thumb
 
-- A change is deployed when Flux has reconciled it — verify with
-  `flux get kustomizations`, not by assuming.
-- If a HelmRelease hangs >30s in install: pull the pod logs of its
+- A change is deployed when Argo CD has reconciled it — verify with
+  `kubectl -n argocd get applications` (Synced/Healthy), not by assuming.
+- If an Application's Helm sync hangs >30s in install: pull the pod logs of its
   init/setup hooks IMMEDIATELY (see `runbooks/incidents/zitadel-bootstrap.md`,
   lesson learned).
 - After every real incident: write `runbooks/incidents/<date>-<slug>.md`

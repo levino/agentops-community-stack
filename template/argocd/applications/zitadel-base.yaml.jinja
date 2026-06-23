@@ -1,0 +1,36 @@
+# ZITADEL namespace + the sealed bootstrap secrets (masterkey, db-credentials).
+# A plain kustomize directory (zitadel/). Until the sealed secrets are
+# committed (scripts/seal-zitadel-secrets.sh), this Application is the ONLY one
+# that stays OutOfSync/Degraded — the rest of the substrate is healthy.
+#
+# Wave 1: needs the sealed-secrets controller (cluster/, wave 0) to decrypt.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zitadel-base
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: https://github.com/{{ github_owner }}/{{ project_name }}
+    targetRevision: main
+    path: zitadel
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zitadel
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        maxDuration: 3m
+        factor: 2

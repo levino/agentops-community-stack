@@ -9,7 +9,7 @@ Internet :80/:443 → {{ server_ipv4 }}
   └── k3s + Traefik (hostPort)
         ├── cert-manager        → TLS via ACME (issuer: acme)
         ├── sealed-secrets      → secrets encrypted in git
-        ├── Flux                → this repo is the truth
+        ├── Argo CD             → this repo is the truth (+ PR previews)
         ├── ZITADEL             → id.{{ domain }} (one identity per person)
         └── apps                → one namespace each (apps/)
 ```

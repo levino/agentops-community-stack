@@ -1,0 +1,39 @@
+# Cluster substrate: cert-manager (+ the `acme` ClusterIssuer), sealed-secrets,
+# the preview-deployer ClusterRole, and the cluster-admin guardrail policy.
+# A plain kustomize directory — Argo CD renders and reconciles it.
+#
+# Wave 0: after Traefik (the issuer's HTTP-01 solver routes through it).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: https://github.com/{{ github_owner }}/{{ project_name }}
+    targetRevision: main
+    path: cluster
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # cert-manager's CRDs are too large for client-side apply.
+      - ServerSideApply=true
+      - CreateNamespace=true
+    retry:
+      # The ClusterIssuer (a CR) races the cert-manager CRDs/webhook on first
+      # sync — retry until they settle.
+      limit: 15
+      backoff:
+        duration: 15s
+        maxDuration: 5m
+        factor: 2

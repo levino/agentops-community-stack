@@ -34,11 +34,15 @@ crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock rmi --prune
 
 ## Prevention (encoded in this template)
 
+- **PR previews are now pull-based and self-cleaning.** Argo CD's
+  ApplicationSet PullRequest generator (`patterns/app-preview-prs/`,
+  `scripts/new-app.sh`) creates one `Application` per open PR and **prunes it
+  automatically when the PR closes** — the root cause (previews nobody cleaned
+  up) is structurally gone. New commits re-sync the PR's namespace to the new
+  `head_sha`, so old pods are replaced, not accumulated. This is the headline
+  reason the stack runs Argo CD.
 - `scripts/new-app.sh` sets `revisionHistoryLimit: 2` and
   `progressDeadlineSeconds: 300` on every deployment it stamps.
-- PR-preview workflows MUST delete all resources (deployment, service,
-  ingress, secrets, certificates) on PR close, and use `kubectl rollout
-  restart` on new commits so old pods disappear.
 - If the server has a small system disk: put k3s data on the big disk
   (`/var/lib/rancher` → symlink/bind-mount) BEFORE the first incident, and
   monitor `df` on the node.

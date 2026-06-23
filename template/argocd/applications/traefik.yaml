@@ -1,0 +1,81 @@
+# Traefik is the only public entry point: it binds 80/443 directly on the
+# node via hostPort (single-node stack, no LoadBalancer available).
+# The k3s-bundled Traefik and servicelb MUST be disabled at install time
+# (see runbooks/bootstrap-from-zero.md).
+#
+# Wave -1: the ingress must exist before cert-manager solvers and the ZITADEL
+# ingress that depend on it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: community
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: 39.0.7
+    helm:
+      values: |
+        api:
+          dashboard: false
+          insecure: false
+        deployment:
+          kind: DaemonSet
+        service:
+          # No LoadBalancer on a single node — Traefik is reached via hostPort.
+          type: ClusterIP
+        ports:
+          web:
+            hostPort: 80
+            expose:
+              default: true
+          websecure:
+            hostPort: 443
+            expose:
+              default: true
+          traefik:
+            expose:
+              default: false
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+          runAsGroup: 0
+          capabilities:
+            add:
+              - NET_BIND_SERVICE
+        updateStrategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxSurge: 0
+            maxUnavailable: 1
+        providers:
+          kubernetesCRD:
+            enabled: true
+            # Middlewares (e.g. the ForwardAuth pair in the `forwardauth`
+            # namespace) are referenced from app namespaces.
+            allowCrossNamespace: true
+          kubernetesIngress:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The chart ships large CRDs; server-side apply avoids the
+      # last-applied-configuration annotation size limit.
+      - ServerSideApply=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 10s
+        maxDuration: 3m
+        factor: 2

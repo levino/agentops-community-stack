@@ -44,8 +44,8 @@ admin credentials out of the repo.
 
 ## Bootstrap (once, after the first ZITADEL deploy)
 
-ZITADEL must be running (`flux get helmrelease zitadel -n zitadel` →
-Ready=True). Mint an operator service-user PAT in the ZITADEL console
+ZITADEL must be running (`kubectl -n argocd get app zitadel` →
+Synced/Healthy). Mint an operator service-user PAT in the ZITADEL console
 (Instance → Service Users → create → generate **Personal Access Token**, give
 it IAM-owner manager role), then provide it to the provider **per session**:
 

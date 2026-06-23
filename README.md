@@ -2,7 +2,7 @@
 
 > **Status: v1 — production-ready.** The template is complete and works: every
 > pull request generates a fresh derivative and boots the *whole* substrate
-> (k3s + Traefik, cert-manager, sealed-secrets, Flux, ZITADEL, real ACME via
+> (k3s + Traefik, cert-manager, sealed-secrets, Argo CD, ZITADEL, real ACME via
 > Pebble, `tofu apply`) end to end, green, on both `amd64` and `arm64`. Generate
 > your community's stack today — see [§6](#6-distribution--usage). v1 is stable
 > and meant to be used; it keeps evolving through the feedback loop in §7.
@@ -46,7 +46,7 @@ Internet :80/:443
   └── k3s + Traefik (hostPort)
         ├── cert-manager        → automatic Let's Encrypt certificates
         ├── sealed-secrets      → secrets encrypted in git
-        ├── Flux                → GitOps reconciler (repo = truth)
+        ├── Argo CD             → GitOps reconciler (repo = truth) + PR previews
         ├── ZITADEL             → central OIDC provider (id.<domain>)
         └── your apps           → one namespace each, one OIDC client each
 ```
@@ -57,7 +57,7 @@ Internet :80/:443
 | **Traefik** | ingress + TLS termination | ships with k3s, ForwardAuth-capable |
 | **cert-manager** | TLS automation | Let's Encrypt without manual work |
 | **sealed-secrets** | secrets in git | encryptable offline against a public key |
-| **Flux** | GitOps reconciler | the repo is the single source of truth |
+| **Argo CD** | GitOps reconciler | the repo is the single source of truth; native PR previews (ApplicationSet) |
 | **ZITADEL** | identity provider | org/project/role + delegated admins + self-service |
 | **OpenTofu** | identity as code | orgs, projects, OIDC clients declaratively |
 | **GitHub Actions + OIDC** | deploy pipeline | no stored kubeconfig secret |
@@ -74,8 +74,8 @@ mechanism. These are two different frequencies:
 
 | Layer | Frequency | Mechanism |
 |---|---|---|
-| **Cluster substrate** (k3s, Traefik, cert-manager, sealed-secrets, Flux, ZITADEL) | **once per community** | Copier — generate once, keep current via `copier update` |
-| **Per-app pattern** (namespace, scoped RBAC, Flux registration, OIDC client) | **many times within the same cluster** | in-repo generator (`scripts/new-app.sh` / skill) inside the generated repo |
+| **Cluster substrate** (k3s, Traefik, cert-manager, sealed-secrets, Argo CD, ZITADEL) | **once per community** | Copier — generate once, keep current via `copier update` |
+| **Per-app pattern** (namespace, Argo CD Application, PR-preview ApplicationSet, OIDC client) | **many times within the same cluster** | in-repo generator (`scripts/new-app.sh` / skill) inside the generated repo |
 
 Copier is for "new community from zero". The in-repo generator is for "the 20th
 app in the same cluster". Both belong in the template, but they solve different
@@ -174,8 +174,8 @@ cd my-infra && git init && git add -A && git commit -m "init" && git push
 ```
 
 From here an **agent** takes over, guided by the bundled `AGENTS.md`: it reads
-the invariants + the bootstrap runbook and brings up k3s/Flux/ZITADEL. That is
-the "tell the agent: rebuild this for me" flow.
+the invariants + the bootstrap runbook and brings up k3s/Argo CD/ZITADEL. That
+is the "tell the agent: rebuild this for me" flow.
 
 Updates later:
 
@@ -228,7 +228,8 @@ Actions on every change:
    file. This alone catches broken Jinja and invalid YAML after substitution.
 2. **Boot** the cluster with **k3d** (k3s in Docker — including the bundled
    Traefik, so fidelity is high).
-3. **Reconcile** the generated repo with Flux.
+3. **Reconcile** the generated repo with Argo CD (install Argo CD, apply the
+   root "app of apps", wait for every `Application` to go Synced/Healthy).
 4. **TLS via Pebble**, Let's Encrypt's purpose-built test ACME server, deployed
    in-cluster and set as cert-manager's issuer. This exercises the real ACME
    machinery (order, HTTP-01 challenge, solver routing through Traefik). Tests
@@ -273,12 +274,13 @@ verify command — when you bring up a real node.
 agentops-community-stack/
 ├── README.md                  # this document (vision + usage)
 ├── copier.yml                 # template questions (domain, IP, org, clubs, …)
-├── .github/workflows/e2e.yml  # CI harness: generate → k3d → Flux → Pebble → smoke tests
+├── .github/workflows/e2e.yml  # CI harness: generate → k3d → Argo CD → Pebble → smoke tests
 ├── tests/
 │   └── answers-ci.yml         # Copier answers for the CI-generated derivative
 └── template/                  # ← Copier _subdirectory: everything below is generated
     ├── AGENTS.md.jinja        # agent contract: invariants + runbooks (see below)
-    ├── cluster/               # substrate: traefik, cert-manager, sealed-secrets, rbac, policy
+    ├── argocd/                # GitOps entry point: AppProject + root "app of apps" + child Applications
+    ├── cluster/               # substrate: cert-manager, sealed-secrets, rbac, policy
     ├── tofu/zitadel/          # identity as code
     │   └── modules/community/ # reusable "org = community, project = club" module
     ├── patterns/              # copyable recipes

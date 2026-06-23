@@ -1,0 +1,44 @@
+# Declarative Helm chart sources. The substrate pulls three charts (traefik,
+# bitnami postgresql, zitadel); the latter two live in OCI registries, which
+# Argo CD must be told to treat as OCI. These are PUBLIC registries — no
+# credentials. (The repo's OWN git source, if private, authenticates with the
+# GitHub App repo credential created at bootstrap — see
+# runbooks/argocd-github-app.md; that one is an infrastructure credential and
+# is NEVER committed, not even sealed, per AGENTS.md inv. 3.)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: traefik-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: helm
+  name: traefik
+  url: https://traefik.github.io/charts
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zitadel-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: helm
+  name: zitadel
+  url: ghcr.io/zitadel/zitadel-charts
+  enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bitnami-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: helm
+  name: bitnami
+  url: registry-1.docker.io/bitnamicharts
+  enableOCI: "true"
