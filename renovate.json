@@ -70,6 +70,18 @@
         "major"
       ],
       "enabled": false
+    },
+    {
+      "description": "Lieferketten-Schutz: Releases von Actions, Helm-Charts und per URL eingebundenen Upstream-Manifesten erst nach 3 Tagen übernehmen (kompromittierte Releases werden meist in Stunden bis Tagen zurückgezogen). Image-Digests (kubernetes) und Sicherheitsfixes kommen sofort.",
+      "matchManagers": [
+        "github-actions",
+        "argocd",
+        "custom.regex"
+      ],
+      "minimumReleaseAge": "3 days"
     }
-  ]
+  ],
+  "vulnerabilityAlerts": {
+    "minimumReleaseAge": null
+  }
 }
